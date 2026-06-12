@@ -32,7 +32,8 @@ function matchLine(ev) {
   const st = comp.status;
   const state = st.type.state; // pre | in | post
   let status;
-  if (state === "in") status = c("green", `LIVE ${st.displayClock || st.type.shortDetail}`);
+  if (st.type.name === "STATUS_HALFTIME") status = c("yellow", "HT");
+  else if (state === "in") status = c("green", `LIVE ${st.displayClock || st.type.shortDetail}`);
   else if (state === "post") status = c("gray", "FT");
   else status = c("dim", new Date(ev.date).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }));
   const score = state === "pre" ? "vs" : `${home.score} - ${away.score}`;
@@ -109,11 +110,13 @@ function renderMatch(ev, sum) {
 
   const lines = [];
   const clock =
-    state === "in"
-      ? c("green", `● LIVE  ${st.displayClock || st.type.shortDetail}`)
-      : state === "post"
-        ? c("gray", "FULL TIME")
-        : c("dim", `Kickoff ${new Date(ev.date).toLocaleString()}`);
+    st.type.name === "STATUS_HALFTIME"
+      ? c("yellow", "⏸ HALFTIME")
+      : state === "in"
+        ? c("green", `● LIVE  ${st.displayClock || st.type.shortDetail}`)
+        : state === "post"
+          ? c("gray", "FULL TIME")
+          : c("dim", `Kickoff ${new Date(ev.date).toLocaleString()}`);
 
   lines.push("");
   lines.push(`  ${c("bold", home.team.displayName)}  ${c("bold", `${home.score ?? 0} - ${away.score ?? 0}`)}  ${c("bold", away.team.displayName)}    ${clock}`);
@@ -239,11 +242,16 @@ async function track(query, { once, interval }) {
     }
     if (!once) process.stdout.write("\x1b[2J\x1b[H"); // clear screen
     console.log(renderMatch(ev, sum));
-    const state = ev.competitions[0].status.type.state;
+    const status = ev.competitions[0].status;
     if (once) break;
-    if (state === "post") { console.log(c("dim", "  Match finished.\n")); break; }
-    console.log(c("dim", `  refreshing every ${interval}s — Ctrl+C to stop`));
-    await new Promise((r) => setTimeout(r, interval * 1000));
+    if (status.type.state === "post") { console.log(c("dim", "  Match finished.\n")); break; }
+    // during halftime, back off to a slow poll until the second half starts
+    const halftime = status.type.name === "STATUS_HALFTIME";
+    const wait = halftime ? Math.max(interval, 120) : interval;
+    console.log(c("dim", halftime
+      ? `  halftime — refresh paused, checking again in ${wait}s — Ctrl+C to stop`
+      : `  refreshing every ${interval}s — Ctrl+C to stop`));
+    await new Promise((r) => setTimeout(r, wait * 1000));
   }
 }
 
