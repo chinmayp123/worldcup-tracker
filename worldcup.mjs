@@ -126,16 +126,31 @@ function renderMatch(ev, sum) {
   const awayStats = statMap(teams.find((t) => t.team.id === away.team.id) || teams[1] || {});
 
   if (Object.keys(homeStats).length) {
+    // fixed grid: [value col][label col][value col] — pad BEFORE coloring so
+    // ANSI escape codes never throw off the column widths
+    const W_VAL = 6, W_LABEL = 24;
+    const padC = (s, w) => {
+      s = String(s);
+      const left = Math.max(0, Math.floor((w - s.length) / 2));
+      return (" ".repeat(left) + s).padEnd(w);
+    };
+    const fmt = (key, v) => {
+      if (v === "-" || v == null) return "-";
+      if (key === "passPct") return `${Math.round(parseFloat(v) * 100)}%`;
+      return String(v);
+    };
     const poss = parseFloat(homeStats.possessionPct || "50");
-    lines.push(`  ${c("cyan", home.team.abbreviation || "HOME")} ${bar(poss)} ${c("magenta", away.team.abbreviation || "AWAY")}   ${c("dim", "possession")}`);
+    lines.push(`  ${c("cyan", padC(home.team.abbreviation || "HOME", W_VAL))}  ${bar(poss, W_LABEL)}  ${c("magenta", padC(away.team.abbreviation || "AWAY", W_VAL))}`);
     lines.push("");
     for (const [key, label] of STAT_ROWS) {
       const hv = homeStats[key] ?? "-";
       const av = awayStats[key] ?? "-";
       if (hv === "-" && av === "-") continue;
-      const hl = Number(hv) > Number(av) ? c("bold", String(hv)) : String(hv);
-      const al = Number(av) > Number(hv) ? c("bold", String(av)) : String(av);
-      lines.push(`  ${hl.padStart(16)}  ${c("dim", label.padStart(14 + (28 - label.length) / 2 | 0).padEnd(28))}  ${al}`);
+      const hPad = padC(fmt(key, hv), W_VAL);
+      const aPad = padC(fmt(key, av), W_VAL);
+      const hl = Number(hv) > Number(av) ? c("bold", hPad) : hPad;
+      const al = Number(av) > Number(hv) ? c("bold", aPad) : aPad;
+      lines.push(`  ${hl}  ${c("dim", padC(label, W_LABEL))}  ${al}`);
     }
     lines.push("");
   }
