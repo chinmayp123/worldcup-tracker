@@ -140,6 +140,33 @@ function renderMatch(ev, sum) {
     lines.push("");
   }
 
+  // goalkeepers — name, saves, goals against, shots faced (covers subbed-in keepers too)
+  const keepers = [];
+  for (const r of sum.rosters || []) {
+    const abbr =
+      r.team?.id === home.team.id ? home.team.abbreviation :
+      r.team?.id === away.team.id ? away.team.abbreviation : r.team?.abbreviation || "";
+    for (const p of r.roster || []) {
+      if (p.position?.abbreviation !== "G") continue;
+      const ps = Object.fromEntries((p.stats || []).map((s) => [s.name, s.value]));
+      if (!ps.appearances) continue; // unused bench keeper
+      keepers.push({ abbr, name: p.athlete?.displayName || "?", ...ps });
+    }
+  }
+  if (keepers.length) {
+    lines.push(c("bold", "  Goalkeepers"));
+    for (const k of keepers) {
+      const saves = k.saves ?? 0;
+      const ga = k.goalsConceded ?? 0;
+      lines.push(
+        `  ${c("bold", (k.abbr || "").padEnd(4))}${k.name.padEnd(24)} ` +
+        `${c("green", `${saves} save${saves === 1 ? "" : "s"}`)}  ` +
+        c("dim", `${ga} conceded, ${k.shotsFaced ?? 0} shots faced`)
+      );
+    }
+    lines.push("");
+  }
+
   // key events (goals, cards, subs) — newest last
   const keyEvents = (sum.keyEvents || []).filter((e) => {
     const t = (e.type?.text || "").toLowerCase();

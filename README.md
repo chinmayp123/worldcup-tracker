@@ -35,6 +35,7 @@ While tracking, the screen refreshes in place with the live score, match clock, 
 - **Score and clock** — live minute, halftime, full time
 - **Possession bar** — visual split between the two teams
 - **Stats table** — the leading team's number is bolded per stat
+- **Goalkeepers** — each keeper's saves, goals conceded, and shots faced (includes subbed-in keepers)
 - **Match events** — goals ⚽, yellow 🟨 / red 🟥 cards, substitutions 🔁, with minute and player
 
 ## Data source
