@@ -62,24 +62,6 @@ function findEvent(events, query) {
   );
 }
 
-// stats worth showing, in display order: [key, label, isPct]
-const STAT_ROWS = [
-  ["possessionPct", "Possession %", true],
-  ["totalShots", "Shots"],
-  ["shotsOnTarget", "On Target"],
-  ["wonCorners", "Corners"],
-  ["foulsCommitted", "Fouls"],
-  ["offsides", "Offsides"],
-  ["yellowCards", "Yellow Cards"],
-  ["redCards", "Red Cards"],
-  ["saves", "Saves"],
-  ["totalPasses", "Passes"],
-  ["passPct", "Pass Accuracy", true],
-  ["totalTackles", "Tackles"],
-  ["interceptions", "Interceptions"],
-  ["effectiveClearance", "Clearances"],
-];
-
 const statMap = (team) =>
   Object.fromEntries((team.statistics || []).map((s) => [s.name, s.displayValue]));
 
@@ -131,29 +113,35 @@ function renderMatch(ev, sum) {
   if (Object.keys(homeStats).length) {
     // fixed grid: [value col][label col][value col] — pad BEFORE coloring so
     // ANSI escape codes never throw off the column widths
-    const W_VAL = 6, W_LABEL = 24;
+    const W_VAL = 10, W_LABEL = 20;
     const padC = (s, w) => {
       s = String(s);
       const left = Math.max(0, Math.floor((w - s.length) / 2));
       return (" ".repeat(left) + s).padEnd(w);
     };
-    const fmt = (key, v) => {
-      if (v === "-" || v == null) return "-";
-      if (key === "passPct") return `${Math.round(parseFloat(v) * 100)}%`;
-      return String(v);
-    };
-    const poss = parseFloat(homeStats.possessionPct || "50");
-    lines.push(`  ${c("cyan", padC(home.team.abbreviation || "HOME", W_VAL))}  ${bar(poss, W_LABEL)}  ${c("magenta", padC(away.team.abbreviation || "AWAY", W_VAL))}`);
-    lines.push("");
-    for (const [key, label] of STAT_ROWS) {
-      const hv = homeStats[key] ?? "-";
-      const av = awayStats[key] ?? "-";
-      if (hv === "-" && av === "-") continue;
-      const hPad = padC(fmt(key, hv), W_VAL);
-      const aPad = padC(fmt(key, av), W_VAL);
-      const hl = Number(hv) > Number(av) ? c("bold", hPad) : hPad;
-      const al = Number(av) > Number(hv) ? c("bold", aPad) : aPad;
-      lines.push(`  ${hl}  ${c("dim", padC(label, W_LABEL))}  ${al}`);
+    const hs = homeStats, as = awayStats;
+    const pct = (v) => `${Math.round(parseFloat(v || 0) * 100)}%`;
+    const poss = parseFloat(hs.possessionPct || "50");
+    lines.push(
+      `  ${c("cyan", padC(`${home.team.abbreviation} ${hs.possessionPct}%`, W_VAL))} ${bar(poss, W_LABEL + 2)} ` +
+      c("magenta", padC(`${as.possessionPct}% ${away.team.abbreviation}`, W_VAL))
+    );
+    // related stats share a row to keep the page short: [label, homeVal, awayVal, homeNum, awayNum]
+    const rows = [
+      ["Shots (on goal)", `${hs.totalShots} (${hs.shotsOnTarget})`, `${as.totalShots} (${as.shotsOnTarget})`, hs.totalShots, as.totalShots],
+      ["Corners", hs.wonCorners, as.wonCorners],
+      ["Fouls / Offsides", `${hs.foulsCommitted} / ${hs.offsides}`, `${as.foulsCommitted} / ${as.offsides}`, hs.foulsCommitted, as.foulsCommitted],
+      ["Yellow / Red", `${hs.yellowCards} / ${hs.redCards}`, `${as.yellowCards} / ${as.redCards}`, hs.yellowCards, as.yellowCards],
+      ["Passes (accuracy)", `${hs.totalPasses} (${pct(hs.passPct)})`, `${as.totalPasses} (${pct(as.passPct)})`, hs.totalPasses, as.totalPasses],
+      ["Tkl / Int / Clear", `${hs.totalTackles}/${hs.interceptions}/${hs.effectiveClearance}`, `${as.totalTackles}/${as.interceptions}/${as.effectiveClearance}`, hs.totalTackles, as.totalTackles],
+    ];
+    for (const [label, hv, av, hn, an] of rows) {
+      if (hv == null || String(hv).includes("undefined")) continue;
+      const hPad = padC(hv, W_VAL);
+      const aPad = padC(av, W_VAL);
+      const hl = Number(hn ?? hv) > Number(an ?? av) ? c("bold", hPad) : hPad;
+      const al = Number(an ?? av) > Number(hn ?? hv) ? c("bold", aPad) : aPad;
+      lines.push(`  ${hl} ${c("dim", padC(label, W_LABEL + 2))} ${al}`);
     }
     lines.push("");
   }
@@ -178,7 +166,7 @@ function renderMatch(ev, sum) {
       const ga = k.goalsConceded ?? 0;
       lines.push(
         `  ${c("bold", (k.abbr || "").padEnd(4))}${k.name.padEnd(24)} ` +
-        `${c("green", `${saves} save${saves === 1 ? "" : "s"}`)}  ` +
+        `${c("green", `${saves} save${saves === 1 ? "" : "s"}`.padEnd(8))}  ` +
         c("dim", `${ga} conceded, ${k.shotsFaced ?? 0} shots faced`)
       );
     }
@@ -195,7 +183,7 @@ function renderMatch(ev, sum) {
   });
   if (keyEvents.length) {
     lines.push(c("bold", "  Match events"));
-    for (const e of keyEvents.slice(-12)) {
+    for (const e of keyEvents.slice(-8)) {
       const minute = e.clock?.displayValue || "";
       const teamAbbr =
         e.team?.id === home.team.id ? home.team.abbreviation :
@@ -204,7 +192,7 @@ function renderMatch(ev, sum) {
         .map((p) => p.athlete?.displayName)
         .filter(Boolean)
         .join(", ");
-      lines.push(`  ${c("dim", minute.padStart(4))}  ${eventIcon(e.type?.text)} ${teamAbbr ? c("bold", teamAbbr) + " " : ""}${players || e.type?.text || ""}`);
+      lines.push(`  ${c("dim", minute.padStart(7))}  ${eventIcon(e.type?.text)} ${teamAbbr ? c("bold", teamAbbr) + " " : ""}${players || e.type?.text || ""}`);
     }
     lines.push("");
   }
@@ -240,7 +228,7 @@ async function track(query, { once, interval }) {
       await new Promise((r) => setTimeout(r, interval * 1000));
       continue;
     }
-    if (!once) process.stdout.write("\x1b[2J\x1b[H"); // clear screen
+    if (!once) process.stdout.write("\x1b[2J\x1b[3J\x1b[H"); // clear screen AND scrollback (3J) so stale frames don't linger above
     console.log(renderMatch(ev, sum));
     const status = ev.competitions[0].status;
     if (once) break;
