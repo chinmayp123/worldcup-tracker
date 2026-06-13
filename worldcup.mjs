@@ -6,8 +6,32 @@
 //   node worldcup.mjs canada          track a match by team name (or event id)
 //   node worldcup.mjs usa --once      single snapshot, no refresh loop
 //   node worldcup.mjs usa -i 15       refresh every 15s (default 30)
+//   node worldcup.mjs groups          all 12 group tables
+//
+// Optional live odds (FanDuel + line shopping): set an ODDS_API_KEY env var, or
+// put {"oddsApiKey":"..."} in odds.config.json (gitignored). Without a key it
+// falls back to ESPN's pre-match line.
+
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
 
 const BASE = "https://site.api.espn.com/apis/site/v2/sports/soccer/fifa.world";
+
+// Optional live-odds key (The Odds API). Read from env or a gitignored config
+// file next to this script — never hard-coded, so the public repo stays clean.
+function loadOddsKey() {
+  if (process.env.ODDS_API_KEY) return process.env.ODDS_API_KEY.trim();
+  try {
+    const here = dirname(fileURLToPath(import.meta.url));
+    const cfg = JSON.parse(readFileSync(join(here, "odds.config.json"), "utf8"));
+    return (cfg.oddsApiKey || "").trim() || null;
+  } catch {
+    return null;
+  }
+}
+const ODDS_KEY = loadOddsKey();
+const ODDS_BASE = "https://api.the-odds-api.com/v4/sports/soccer_fifa_world_cup/odds";
 
 const C = {
   reset: "\x1b[0m", bold: "\x1b[1m", dim: "\x1b[2m",
@@ -39,6 +63,62 @@ function impliedProbs(odds) {
   const raw = [ml2p(odds.homeTeamOdds.moneyLine), ml2p(odds.drawOdds?.moneyLine), ml2p(odds.awayTeamOdds?.moneyLine)];
   const sum = raw.reduce((a, b) => a + b, 0) || 1;
   return raw.map((p) => Math.round((p / sum) * 100));
+}
+
+const ml2prob = (ml) => (ml == null ? null : ml > 0 ? 100 / (ml + 100) : -ml / (-ml + 100));
+const fmtAmerican = (ml) => (ml == null ? "-" : ml > 0 ? `+${ml}` : `${ml}`);
+
+// --- The Odds API: live multi-book odds (FanDuel + best-of-book line shopping) ---
+// Cache to stay under the free tier's 500-request quota: refetch at most every 2 min.
+let _oddsCache = { at: 0, events: null };
+async function fetchOddsEvents() {
+  if (!ODDS_KEY) return null;
+  const now = Date.now();
+  if (_oddsCache.events && now - _oddsCache.at < 120000) return _oddsCache.events;
+  const url = `${ODDS_BASE}/?apiKey=${ODDS_KEY}&regions=us&markets=h2h&oddsFormat=american`;
+  const res = await fetch(url, { headers: { "User-Agent": "worldcup-cli" } });
+  if (!res.ok) throw new Error(`Odds API HTTP ${res.status}`);
+  _oddsCache = {
+    at: now,
+    events: await res.json(),
+    remaining: res.headers.get("x-requests-remaining"),
+  };
+  return _oddsCache.events;
+}
+
+const normTeam = (s) =>
+  (s || "").toLowerCase().replace(/[^a-z]/g, "").replace(/^(the)/, "");
+function teamsMatch(a, b) {
+  const x = normTeam(a), y = normTeam(b);
+  return x === y || x.includes(y) || y.includes(x);
+}
+
+// find the odds-API event matching an ESPN match, build a per-outcome book comparison
+function matchOdds(events, homeName, awayName) {
+  if (!events) return null;
+  const ev = events.find(
+    (e) =>
+      (teamsMatch(e.home_team, homeName) && teamsMatch(e.away_team, awayName)) ||
+      (teamsMatch(e.home_team, awayName) && teamsMatch(e.away_team, homeName))
+  );
+  if (!ev) return null;
+  // collect every book's price for Home / Draw / Away
+  const outcomes = { home: [], draw: [], away: [] };
+  for (const bk of ev.bookmakers || []) {
+    const m = (bk.markets || []).find((mk) => mk.key === "h2h");
+    if (!m) continue;
+    for (const o of m.outcomes || []) {
+      const slot = teamsMatch(o.name, ev.home_team) ? "home"
+        : teamsMatch(o.name, ev.away_team) ? "away"
+        : /draw/i.test(o.name) ? "draw" : null;
+      if (slot) outcomes[slot].push({ book: bk.key, price: o.price });
+    }
+  }
+  const book = (slot, key) => outcomes[slot].find((x) => x.book === key);
+  const best = (slot) =>
+    outcomes[slot].reduce((b, x) => (b == null || x.price > b.price ? x : b), null);
+  const live = new Date(ev.commence_time).getTime() < Date.now();
+  return { ev, outcomes, book, best, live, swapped: teamsMatch(ev.away_team, homeName) };
 }
 
 function matchLine(ev) {
@@ -96,6 +176,39 @@ async function listMatches({ days = 3 } = {}) {
   return events;
 }
 
+const allStandings = () => getJSON(`https://site.api.espn.com/apis/v2/sports/soccer/fifa.world/standings`);
+
+// render one group's table; `highlight` is a set of team names to emphasize
+function renderGroupTable(name, entries, highlight = new Set()) {
+  const stat = (e, n) => (e.stats || []).find((s) => s.name === n)?.displayValue ?? "";
+  const teamName = (t) => (typeof t === "string" ? t : t?.displayName || t?.name || "?");
+  const out = [c("bold", `  ${name}`), c("dim", "      Team                P   W-D-L   GD  Pts")];
+  const sorted = [...entries].sort((a, b) => Number(stat(a, "rank")) - Number(stat(b, "rank")));
+  for (const e of sorted) {
+    const nm = teamName(e.team);
+    const rank = Number(stat(e, "rank"));
+    // top 2 qualify directly; show a marker
+    const mark = rank <= 2 ? c("green", "▲") : " ";
+    const row =
+      `  ${String(rank).padStart(2)}${mark} ${nm.padEnd(18)} ` +
+      `${stat(e, "gamesPlayed").padStart(2)}   ${stat(e, "overall").padEnd(7)} ` +
+      `${stat(e, "pointDifferential").padStart(3)}  ${stat(e, "points").padStart(3)}`;
+    out.push(highlight.has(nm) ? c("cyan", row) : row);
+  }
+  return out.join("\n");
+}
+
+async function showGroups() {
+  const j = await allStandings();
+  const groups = j.children || [];
+  if (!groups.length) return console.log("No standings available yet.");
+  console.log(c("bold", "\n  FIFA World Cup 2026 — Group Standings") + c("dim", "   (▲ = top 2, advance)\n"));
+  for (const g of groups) {
+    console.log(renderGroupTable(g.name, g.standings?.entries || []));
+    console.log("");
+  }
+}
+
 function findEvent(events, query) {
   const q = query.toLowerCase();
   return events.find((ev) =>
@@ -129,7 +242,7 @@ function eventIcon(type) {
   return c("dim", "•");
 }
 
-function renderMatch(ev, sum) {
+function renderMatch(ev, sum, liveOdds) {
   const comp = ev.competitions[0];
   const home = comp.competitors.find((t) => t.homeAway === "home");
   const away = comp.competitors.find((t) => t.homeAway === "away");
@@ -192,49 +305,69 @@ function renderMatch(ev, sum) {
     lines.push("");
   }
 
-  // betting odds — ESPN's free API only carries the PRE-MATCH line (no live in-play
-  // odds), so label it honestly and add implied win probabilities from the moneylines
-  const odds = (sum.pickcenter || sum.odds || [])[0];
-  if (odds && odds.homeTeamOdds?.moneyLine != null) {
-    const ml2prob = (ml) =>
-      ml == null ? null : ml > 0 ? 100 / (ml + 100) : -ml / (-ml + 100);
-    const fmtML = (ml) => (ml == null ? "-" : ml > 0 ? `+${ml}` : `${ml}`);
-    const hML = odds.homeTeamOdds.moneyLine;
-    const aML = odds.awayTeamOdds?.moneyLine;
-    const dML = odds.drawOdds?.moneyLine;
-    // normalize implied probs so the three outcomes sum to 100% (strips the vig)
-    const raw = [ml2prob(hML), ml2prob(dML), ml2prob(aML)];
+  // betting odds — prefer live multi-book odds (The Odds API) when a key is set,
+  // otherwise fall back to ESPN's pre-match opening line.
+  if (liveOdds) {
+    // home/away in odds-API terms may be swapped vs ESPN; map our home/away to the right slot
+    const slotHome = liveOdds.swapped ? "away" : "home";
+    const slotAway = liveOdds.swapped ? "home" : "away";
+    const fd = (slot) => liveOdds.book(slot, "fanduel");
+    const best = (slot) => liveOdds.best(slot);
+    // FanDuel line with vig-stripped implied probabilities
+    const fdML = [fd(slotHome)?.price, fd("draw")?.price, fd(slotAway)?.price];
+    const raw = fdML.map(ml2prob);
     const sumP = raw.reduce((a, b) => a + (b || 0), 0) || 1;
-    const [hP, dP, aP] = raw.map((p) => (p == null ? null : Math.round((p / sumP) * 100)));
+    const probs = raw.map((p) => (p == null ? null : Math.round((p / sumP) * 100)));
     const prob = (p) => (p == null ? "" : c("dim", ` ${p}%`));
-    lines.push(c("bold", "  Pre-match odds") + c("dim", `  (${odds.provider?.name || "book"} — opening line, not live)`));
+    const tag = liveOdds.live ? c("green", "● LIVE") : c("dim", "pre-match");
+    lines.push(c("bold", "  FanDuel odds") + `  ${tag}` + c("dim", `  (req left: ${_oddsCache.remaining ?? "?"})`));
     lines.push(
-      `  ${c("bold", home.team.abbreviation)} ${fmtML(hML)}${prob(hP)}` +
-      `   Draw ${fmtML(dML)}${prob(dP)}` +
-      `   ${c("bold", away.team.abbreviation)} ${fmtML(aML)}${prob(aP)}`
+      `  ${c("bold", home.team.abbreviation)} ${fmtAmerican(fdML[0])}${prob(probs[0])}` +
+      `   Draw ${fmtAmerican(fdML[1])}${prob(probs[1])}` +
+      `   ${c("bold", away.team.abbreviation)} ${fmtAmerican(fdML[2])}${prob(probs[2])}`
     );
-    if (odds.details || odds.overUnder != null)
-      lines.push(c("dim", `  Spread ${odds.details || "-"}   O/U ${odds.overUnder ?? "-"}`));
+    // line shopping: best available price across all books for each outcome
+    const bestLine = (label, slot) => {
+      const b = best(slot);
+      if (!b) return null;
+      const isFd = b.book === "fanduel";
+      return `${label} ${c("green", fmtAmerican(b.price))} ${c("dim", `@${b.book}${isFd ? "" : " ▲"}`)}`;
+    };
+    const shop = [
+      bestLine(home.team.abbreviation, slotHome),
+      bestLine("Draw", "draw"),
+      bestLine(away.team.abbreviation, slotAway),
+    ].filter(Boolean);
+    if (shop.length) lines.push(c("dim", "  best price: ") + shop.join(c("dim", "  ")));
     lines.push("");
+  } else {
+    // ESPN fallback — pre-match opening line only (no live odds without a key)
+    const odds = (sum.pickcenter || sum.odds || [])[0];
+    if (odds && odds.homeTeamOdds?.moneyLine != null) {
+      const hML = odds.homeTeamOdds.moneyLine;
+      const aML = odds.awayTeamOdds?.moneyLine;
+      const dML = odds.drawOdds?.moneyLine;
+      const raw = [ml2prob(hML), ml2prob(dML), ml2prob(aML)];
+      const sumP = raw.reduce((a, b) => a + (b || 0), 0) || 1;
+      const [hP, dP, aP] = raw.map((p) => (p == null ? null : Math.round((p / sumP) * 100)));
+      const prob = (p) => (p == null ? "" : c("dim", ` ${p}%`));
+      lines.push(c("bold", "  Pre-match odds") + c("dim", `  (${odds.provider?.name || "book"} — opening line, not live)`));
+      lines.push(
+        `  ${c("bold", home.team.abbreviation)} ${fmtAmerican(hML)}${prob(hP)}` +
+        `   Draw ${fmtAmerican(dML)}${prob(dP)}` +
+        `   ${c("bold", away.team.abbreviation)} ${fmtAmerican(aML)}${prob(aP)}`
+      );
+      if (odds.details || odds.overUnder != null)
+        lines.push(c("dim", `  Spread ${odds.details || "-"}   O/U ${odds.overUnder ?? "-"}`));
+      lines.push("");
+    }
   }
 
   // group standings — table for this match's group, with both teams highlighted
   const group = sum.standings?.groups?.[0];
   if (group?.standings?.entries?.length) {
-    const teamName = (t) => (typeof t === "string" ? t : t?.displayName || t?.abbreviation || "?");
-    const getStat = (e, name) =>
-      (e.stats || []).find((s) => s.name === name)?.displayValue ?? "";
-    lines.push(c("bold", `  ${group.header || "Group"}`));
-    lines.push(c("dim", "      Team                    P   W-D-L   GD  Pts"));
-    for (const e of group.standings.entries) {
-      const name = teamName(e.team);
-      const isHere = name === home.team.displayName || name === away.team.displayName;
-      const row =
-        `  ${getStat(e, "rank").padStart(2)}  ${name.padEnd(22)} ` +
-        `${getStat(e, "gamesPlayed").padStart(2)}   ${getStat(e, "overall").padEnd(7)} ` +
-        `${getStat(e, "pointDifferential").padStart(3)}  ${getStat(e, "points").padStart(3)}`;
-      lines.push(isHere ? c("cyan", row) : c("dim", row));
-    }
+    const here = new Set([home.team.displayName, away.team.displayName]);
+    lines.push(renderGroupTable(group.header || "Group", group.standings.entries, here));
     lines.push("");
   }
 
@@ -329,6 +462,17 @@ async function track(query, { once, interval }) {
     const isGoal = prevScore && score[0] + score[1] > prevScore[0] + prevScore[1];
     prevScore = score;
 
+    // live multi-book odds (cached ~2 min); silently skip if no key or fetch fails
+    let liveOdds = null;
+    if (ODDS_KEY) {
+      try {
+        const comp = ev.competitions[0];
+        const h = comp.competitors.find((t) => t.homeAway === "home");
+        const a = comp.competitors.find((t) => t.homeAway === "away");
+        liveOdds = matchOdds(await fetchOddsEvents(), h.team.displayName, a.team.displayName);
+      } catch { /* fall back to ESPN pre-match odds */ }
+    }
+
     if (!once) process.stdout.write("\x1b[2J\x1b[3J\x1b[H"); // clear screen AND scrollback (3J) so stale frames don't linger above
     if (isGoal) {
       const comp = ev.competitions[0];
@@ -337,7 +481,7 @@ async function track(query, { once, interval }) {
       process.stdout.write("\x07"); // terminal bell
       console.log(c("green", c("bold", `\n  ⚽⚽⚽  GOAL!  ${h.team.abbreviation} ${h.score} - ${a.score} ${a.team.abbreviation}  ⚽⚽⚽\n`)));
     }
-    console.log(renderMatch(ev, sum));
+    console.log(renderMatch(ev, sum, liveOdds));
     const status = ev.competitions[0].status;
     if (once) break;
     if (status.type.state === "post") { console.log(c("dim", "  Match finished.\n")); break; }
@@ -361,4 +505,5 @@ const positional = args.filter((a, idx) => !a.startsWith("-") && (iIdx === -1 ||
 const cmd = positional[0];
 
 if (cmd === "list") await listMatches();
+else if (cmd === "groups" || cmd === "table" || cmd === "standings") await showGroups();
 else await track(cmd, { once, interval });
