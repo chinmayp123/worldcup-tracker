@@ -22,7 +22,7 @@ Live FIFA World Cup 2026 match tracker for your terminal. Zero dependencies — 
 
 ```sh
 node worldcup.mjs              # auto-track the live game (or list today's matches)
-node worldcup.mjs list         # show today's matches with scores and status
+node worldcup.mjs list         # upcoming schedule (today + next 2 days) with odds
 node worldcup.mjs canada       # track a match by team name, abbreviation, or event id
 node worldcup.mjs usa --once   # single snapshot, no refresh loop
 node worldcup.mjs usa -i 15    # refresh every 15 seconds (default 30, min 10)

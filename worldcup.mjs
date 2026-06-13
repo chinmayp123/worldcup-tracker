@@ -23,7 +23,23 @@ async function getJSON(url) {
 }
 
 const scoreboard = () => getJSON(`${BASE}/scoreboard`);
+const scoreboardOn = (yyyymmdd) => getJSON(`${BASE}/scoreboard?dates=${yyyymmdd}`);
 const summary = (id) => getJSON(`${BASE}/summary?event=${id}`);
+
+// YYYYMMDD for `offset` days from today, built without Date.now()-style calls being an issue
+function ymd(daysAhead = 0) {
+  const d = new Date(Date.now() + daysAhead * 86400000);
+  return `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, "0")}${String(d.getDate()).padStart(2, "0")}`;
+}
+
+// implied win % for each outcome, vig-stripped to sum to 100
+function impliedProbs(odds) {
+  if (!odds || odds.homeTeamOdds?.moneyLine == null) return null;
+  const ml2p = (ml) => (ml == null ? 0 : ml > 0 ? 100 / (ml + 100) : -ml / (-ml + 100));
+  const raw = [ml2p(odds.homeTeamOdds.moneyLine), ml2p(odds.drawOdds?.moneyLine), ml2p(odds.awayTeamOdds?.moneyLine)];
+  const sum = raw.reduce((a, b) => a + b, 0) || 1;
+  return raw.map((p) => Math.round((p / sum) * 100));
+}
 
 function matchLine(ev) {
   const comp = ev.competitions[0];
@@ -37,15 +53,45 @@ function matchLine(ev) {
   else if (state === "post") status = c("gray", "FT");
   else status = c("dim", new Date(ev.date).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }));
   const score = state === "pre" ? "vs" : `${home.score} - ${away.score}`;
-  return `  ${c("dim", ev.id)}  ${home.team.displayName.padEnd(22)} ${c("bold", score.padStart(5))}  ${away.team.displayName.padEnd(22)} ${status}`;
+  let line = `  ${c("dim", ev.id)}  ${home.team.displayName.padEnd(22)} ${c("bold", score.padStart(5))}  ${away.team.displayName.padEnd(22)} ${status}`;
+  // for upcoming games, append the market's implied odds if posted
+  if (state === "pre") {
+    const probs = impliedProbs((comp.odds || [])[0]);
+    if (probs) line += c("dim", `   ${home.team.abbreviation} ${probs[0]}% / Draw ${probs[1]}% / ${away.team.abbreviation} ${probs[2]}%`);
+  }
+  return line;
 }
 
-async function listMatches() {
-  const sb = await scoreboard();
-  const events = sb.events || [];
-  if (!events.length) return console.log("No World Cup matches today.");
-  console.log(c("bold", `\n  FIFA World Cup 2026 — ${sb.day?.date || "today"}\n`));
-  for (const ev of events) console.log(matchLine(ev));
+async function listMatches({ days = 3 } = {}) {
+  // pull today plus the next few days, dedupe, and keep chronological order
+  const boards = await Promise.all(
+    Array.from({ length: days }, (_, i) => scoreboardOn(ymd(i)).catch(() => ({ events: [] })))
+  );
+  const seen = new Set();
+  const events = [];
+  for (const b of boards)
+    for (const ev of b.events || [])
+      if (!seen.has(ev.id)) { seen.add(ev.id); events.push(ev); }
+  events.sort((a, b) => new Date(a.date) - new Date(b.date));
+  if (!events.length) return console.log("No World Cup matches scheduled.");
+
+  // odds aren't attached at scoreboard level, so fetch them per upcoming game (capped, in parallel)
+  const upcoming = events.filter((e) => e.competitions[0].status.type.state === "pre").slice(0, 14);
+  await Promise.all(
+    upcoming.map((ev) =>
+      summary(ev.id)
+        .then((s) => { ev.competitions[0].odds = s.pickcenter || s.odds || []; })
+        .catch(() => {})
+    )
+  );
+
+  console.log(c("bold", "\n  FIFA World Cup 2026\n"));
+  let curDay = "";
+  for (const ev of events) {
+    const day = new Date(ev.date).toLocaleDateString([], { weekday: "short", month: "short", day: "numeric" });
+    if (day !== curDay) { curDay = day; console.log(c("cyan", `  ── ${day} ──`)); }
+    console.log(matchLine(ev));
+  }
   console.log(c("dim", "\n  Track one:  node worldcup.mjs <team name or id>\n"));
   return events;
 }
