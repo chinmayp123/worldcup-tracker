@@ -36,6 +36,7 @@ While tracking, the screen refreshes in place with the live score, match clock, 
 - **Possession bar** — visual split between the two teams
 - **Stats table** — the leading team's number is bolded per stat
 - **Goalkeepers** — each keeper's saves, goals conceded, and shots faced (includes subbed-in keepers)
+- **Pre-match odds** — moneyline for each outcome with vig-stripped implied win probabilities, plus spread and over/under. Note: ESPN's free API only carries the opening line, not live in-play odds.
 - **Match events** — goals ⚽, yellow 🟨 / red 🟥 cards, substitutions 🔁, with minute and player
 
 ## Data source

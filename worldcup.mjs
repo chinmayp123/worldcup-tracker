@@ -146,6 +146,32 @@ function renderMatch(ev, sum) {
     lines.push("");
   }
 
+  // betting odds — ESPN's free API only carries the PRE-MATCH line (no live in-play
+  // odds), so label it honestly and add implied win probabilities from the moneylines
+  const odds = (sum.pickcenter || sum.odds || [])[0];
+  if (odds && odds.homeTeamOdds?.moneyLine != null) {
+    const ml2prob = (ml) =>
+      ml == null ? null : ml > 0 ? 100 / (ml + 100) : -ml / (-ml + 100);
+    const fmtML = (ml) => (ml == null ? "-" : ml > 0 ? `+${ml}` : `${ml}`);
+    const hML = odds.homeTeamOdds.moneyLine;
+    const aML = odds.awayTeamOdds?.moneyLine;
+    const dML = odds.drawOdds?.moneyLine;
+    // normalize implied probs so the three outcomes sum to 100% (strips the vig)
+    const raw = [ml2prob(hML), ml2prob(dML), ml2prob(aML)];
+    const sumP = raw.reduce((a, b) => a + (b || 0), 0) || 1;
+    const [hP, dP, aP] = raw.map((p) => (p == null ? null : Math.round((p / sumP) * 100)));
+    const prob = (p) => (p == null ? "" : c("dim", ` ${p}%`));
+    lines.push(c("bold", "  Pre-match odds") + c("dim", `  (${odds.provider?.name || "book"} — opening line, not live)`));
+    lines.push(
+      `  ${c("bold", home.team.abbreviation)} ${fmtML(hML)}${prob(hP)}` +
+      `   Draw ${fmtML(dML)}${prob(dP)}` +
+      `   ${c("bold", away.team.abbreviation)} ${fmtML(aML)}${prob(aP)}`
+    );
+    if (odds.details || odds.overUnder != null)
+      lines.push(c("dim", `  Spread ${odds.details || "-"}   O/U ${odds.overUnder ?? "-"}`));
+    lines.push("");
+  }
+
   // goalkeepers — name, saves, goals against, shots faced (covers subbed-in keepers too)
   const keepers = [];
   for (const r of sum.rosters || []) {
