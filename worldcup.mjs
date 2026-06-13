@@ -218,6 +218,26 @@ function renderMatch(ev, sum) {
     lines.push("");
   }
 
+  // group standings — table for this match's group, with both teams highlighted
+  const group = sum.standings?.groups?.[0];
+  if (group?.standings?.entries?.length) {
+    const teamName = (t) => (typeof t === "string" ? t : t?.displayName || t?.abbreviation || "?");
+    const getStat = (e, name) =>
+      (e.stats || []).find((s) => s.name === name)?.displayValue ?? "";
+    lines.push(c("bold", `  ${group.header || "Group"}`));
+    lines.push(c("dim", "      Team                    P   W-D-L   GD  Pts"));
+    for (const e of group.standings.entries) {
+      const name = teamName(e.team);
+      const isHere = name === home.team.displayName || name === away.team.displayName;
+      const row =
+        `  ${getStat(e, "rank").padStart(2)}  ${name.padEnd(22)} ` +
+        `${getStat(e, "gamesPlayed").padStart(2)}   ${getStat(e, "overall").padEnd(7)} ` +
+        `${getStat(e, "pointDifferential").padStart(3)}  ${getStat(e, "points").padStart(3)}`;
+      lines.push(isHere ? c("cyan", row) : c("dim", row));
+    }
+    lines.push("");
+  }
+
   // goalkeepers — name, saves, goals against, shots faced (covers subbed-in keepers too)
   const keepers = [];
   for (const r of sum.rosters || []) {
@@ -288,6 +308,10 @@ async function track(query, { once, interval }) {
     else { await listMatches(); return; }
   }
 
+  const scoreOf = (e) =>
+    e.competitions[0].competitors.map((t) => Number(t.score) || 0);
+  let prevScore = null;
+
   for (;;) {
     let sum;
     try {
@@ -300,7 +324,19 @@ async function track(query, { once, interval }) {
       await new Promise((r) => setTimeout(r, interval * 1000));
       continue;
     }
+    // detect a goal: total score went up since the last refresh
+    const score = scoreOf(ev);
+    const isGoal = prevScore && score[0] + score[1] > prevScore[0] + prevScore[1];
+    prevScore = score;
+
     if (!once) process.stdout.write("\x1b[2J\x1b[3J\x1b[H"); // clear screen AND scrollback (3J) so stale frames don't linger above
+    if (isGoal) {
+      const comp = ev.competitions[0];
+      const h = comp.competitors.find((t) => t.homeAway === "home");
+      const a = comp.competitors.find((t) => t.homeAway === "away");
+      process.stdout.write("\x07"); // terminal bell
+      console.log(c("green", c("bold", `\n  ⚽⚽⚽  GOAL!  ${h.team.abbreviation} ${h.score} - ${a.score} ${a.team.abbreviation}  ⚽⚽⚽\n`)));
+    }
     console.log(renderMatch(ev, sum));
     const status = ev.competitions[0].status;
     if (once) break;
