@@ -424,6 +424,119 @@ function renderMatch(ev, sum, liveOdds) {
   return lines.join("\n");
 }
 
+// Halftime read: compare the run of play (xG-proxy, shots, possession, corners)
+// against the score and the live market price, and surface betting *considerations*.
+// These are heuristics, not a system that beats the books — framed honestly.
+function halftimeRead(ev, sum, liveOdds) {
+  const comp = ev.competitions[0];
+  const home = comp.competitors.find((t) => t.homeAway === "home");
+  const away = comp.competitors.find((t) => t.homeAway === "away");
+  const teams = sum.boxscore?.teams || [];
+  const hs = statMap(teams.find((t) => t.team.id === home.team.id) || teams[0] || {});
+  const as = statMap(teams.find((t) => t.team.id === away.team.id) || teams[1] || {});
+  if (!Object.keys(hs).length) return [];
+  const n = (v) => parseFloat(v) || 0;
+  const hScore = Number(home.score) || 0, aScore = Number(away.score) || 0;
+  const HA = home.team.abbreviation, AA = away.team.abbreviation;
+
+  // crude xG proxy: shots on target are worth far more than off-target attempts
+  const xg = (s) => n(s.shotsOnTarget) * 0.33 + Math.max(0, n(s.totalShots) - n(s.shotsOnTarget)) * 0.04;
+  const hX = xg(hs), aX = xg(as), combinedX = hX + aX;
+
+  // dominance index: weighted share of the underlying numbers
+  const share = (h, a) => { const t = h + a; return t ? h / t : 0.5; };
+  const weights = [
+    [xg(hs), xg(as), 0.40],
+    [n(hs.shotsOnTarget), n(as.shotsOnTarget), 0.25],
+    [n(hs.totalShots), n(as.totalShots), 0.15],
+    [n(hs.possessionPct), n(as.possessionPct), 0.10],
+    [n(hs.wonCorners), n(as.wonCorners), 0.10],
+  ];
+  const hDom = Math.round(weights.reduce((acc, [h, a, w]) => acc + share(h, a) * w, 0) * 100);
+  const aDom = 100 - hDom;
+  const domLeader = hDom >= aDom ? { abbr: HA, dom: hDom, side: "home" } : { abbr: AA, dom: aDom, side: "away" };
+
+  // market implied probs from FanDuel (vig-stripped), if we have live odds
+  let mkt = null;
+  if (liveOdds) {
+    const sH = liveOdds.swapped ? "away" : "home";
+    const sA = liveOdds.swapped ? "home" : "away";
+    const price = (slot) => liveOdds.book(slot, "fanduel")?.price;
+    const pH = price(sH), pD = price("draw"), pA = price(sA);
+    const raw = [pH, pD, pA].map(ml2prob);
+    const sum2 = raw.reduce((x, y) => x + (y || 0), 0) || 1;
+    mkt = {
+      home: { price: pH, prob: Math.round((raw[0] / sum2) * 100) },
+      draw: { price: pD, prob: Math.round((raw[1] / sum2) * 100) },
+      away: { price: pA, prob: Math.round((raw[2] / sum2) * 100) },
+    };
+  }
+
+  const out = [];
+  out.push(c("bold", c("yellow", "  ── HALFTIME READ ──")));
+  out.push(
+    `  Run of play: ${c("bold", domLeader.abbr)} on top (${domLeader.dom}% control)` +
+    c("dim", `   xG ${HA} ${hX.toFixed(2)} – ${aX.toFixed(2)} ${AA}   score ${hScore}-${aScore}`)
+  );
+
+  // build considerations
+  const recs = [];
+  const leadByScore = hScore === aScore ? null : hScore > aScore ? "home" : "away";
+  const domSide = domLeader.side, domAbbr = domLeader.abbr, domPct = domLeader.dom;
+  const priceFor = (side) => (mkt ? `${fmtAmerican(mkt[side].price)} (${mkt[side].prob}%)` : "no live price");
+
+  // 1) dominant side not yet ahead → they're the better team, second half favors them
+  if (domPct >= 60 && leadByScore !== domSide) {
+    const strong = domPct >= 67;
+    recs.push({
+      conf: strong ? "Strong lean" : "Lean",
+      text:
+        `${c("bold", domAbbr)} to win the match @ ${c("green", priceFor(domSide))} — ` +
+        `controlling the game (${domPct}%, xG edge) but ${leadByScore ? "trailing" : "level"}; ` +
+        `the run of play says they're the better side and haven't been rewarded yet.`,
+    });
+  }
+
+  // 2) dominant side already leading → market likely short, flag as chalk
+  if (domPct >= 58 && leadByScore === domSide) {
+    recs.push({
+      conf: "Low value",
+      text:
+        `${c("bold", domAbbr)} are both ahead and on top — the price (${priceFor(domSide)}) already reflects it. ` +
+        `Fair, but little edge left.`,
+    });
+  }
+
+  // 3) goals direction (no live totals price on the free tier — directional only)
+  if (combinedX >= 1.3 && hScore + aScore <= 2) {
+    recs.push({
+      conf: "Lean",
+      text:
+        `Over goals / both-teams-to-score — ${combinedX.toFixed(2)} combined xG with chances flowing ` +
+        `(${n(hs.totalShots) + n(as.totalShots)} shots) but only ${hScore + aScore} scored so far. ` +
+        c("dim", "(no live totals price on the free tier — directional)"),
+    });
+  } else if (combinedX < 0.6 && n(hs.totalShots) + n(as.totalShots) <= 6) {
+    recs.push({
+      conf: "Lean",
+      text:
+        `Under goals / draw-no-bet — sterile half (${combinedX.toFixed(2)} combined xG, few clear chances). ` +
+        c("dim", "(directional)"),
+    });
+  }
+
+  // 4) tight & even → no edge
+  if (!recs.length) {
+    recs.push({ conf: "No edge", text: "Even contest with no clear trend-vs-price gap — nothing stands out. Sit this one out." });
+  }
+
+  const confColor = (cf) =>
+    cf.startsWith("Strong") ? c("green", cf) : cf === "Lean" ? c("cyan", cf) : c("dim", cf);
+  for (const r of recs) out.push(`  ${confColor(`[${r.conf}]`)} ${r.text}`);
+  out.push(c("dim", "  ⚠ Heuristic read, not financial advice. Odds are -EV on average; stake small."));
+  return out;
+}
+
 async function track(query, { once, interval }) {
   const sb = await scoreboard();
   const events = sb.events || [];
@@ -487,6 +600,10 @@ async function track(query, { once, interval }) {
     if (status.type.state === "post") { console.log(c("dim", "  Match finished.\n")); break; }
     // during halftime, back off to a slow poll until the second half starts
     const halftime = status.type.name === "STATUS_HALFTIME";
+    if (halftime) {
+      const read = halftimeRead(ev, sum, liveOdds);
+      if (read.length) console.log("\n" + read.join("\n") + "\n");
+    }
     const wait = halftime ? Math.max(interval, 120) : interval;
     console.log(c("dim", halftime
       ? `  halftime — refresh paused, checking again in ${wait}s — Ctrl+C to stop`

@@ -41,6 +41,7 @@ While tracking, the screen refreshes in place with the live score, match clock, 
 - **Group standings** — the live group table (rank, played, W-D-L, goal difference, points) with both teams in the current match highlighted
 - **Match events** — goals ⚽, yellow 🟨 / red 🟥 cards, substitutions 🔁, with minute and player
 - **Goal alert** — a terminal bell and flashing banner the moment the score changes while live-tracking
+- **Halftime read** — at the break, compares the run of play (xG-proxy, shots, possession, corners) against the score and the live market price, and surfaces betting *considerations* with reasoning and a confidence tag. Heuristic, not a tip service — clearly labeled as such.
 
 ## Live odds (optional)
 
