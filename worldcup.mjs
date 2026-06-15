@@ -68,6 +68,51 @@ function impliedProbs(odds) {
 const ml2prob = (ml) => (ml == null ? null : ml > 0 ? 100 / (ml + 100) : -ml / (-ml + 100));
 const fmtAmerican = (ml) => (ml == null ? "-" : ml > 0 ? `+${ml}` : `${ml}`);
 
+// Poisson CDF P(X<=k) for integer k>=0, mean lambda — used for model-derived save lines
+function poissonCdf(k, lambda) {
+  if (k < 0) return 0;
+  let term = Math.exp(-lambda), sum = term;
+  for (let i = 1; i <= k; i++) { term *= lambda / i; sum += term; }
+  return sum;
+}
+// fair American odds from a probability (no vig) — for model-derived lines, not a book price
+function probToAmerican(p) {
+  if (!(p > 0) || p >= 1) return null;
+  return p > 0.5 ? Math.round((-p / (1 - p)) * 100) : Math.round(((1 - p) / p) * 100);
+}
+// current match minute from status (handles halftime / full time), or null pre-match
+function matchMinute(st) {
+  if (st?.type?.name === "STATUS_HALFTIME") return 45;
+  if (st?.type?.state === "post") return 90;
+  if (st?.type?.state !== "in") return null;
+  const m = /(\d+)/.exec(st.displayClock || st.type?.shortDetail || "");
+  return m ? Number(m[1]) : null;
+}
+// bracketed, color-coded confidence tag, shared by the live recs and the halftime read
+const confTag = (cf) => {
+  const label = `[${cf}]`;
+  if (cf.startsWith("Strong")) return c("green", label);
+  if (cf === "Lean") return c("cyan", label);
+  return c("dim", label);
+};
+
+// model-derived saves line for a keeper: extrapolate the current save rate to full time
+// and price an over/under (default 2.5) via Poisson. NO sportsbook in the feed offers a
+// keeper-saves market, so this is explicitly a model estimate, never a real book price.
+function keeperSaveLine(saves, minute, state, line = 2.5) {
+  const FT = 95; // include typical stoppage time
+  if (state === "post") return { proj: saves, settled: true, over: saves > line, line };
+  if (minute == null) return null; // pre-match: nothing to project
+  const elapsed = Math.max(minute, 10); // guard against early-game noise
+  const rate = saves / elapsed; // saves per minute so far
+  const remMin = Math.max(0, FT - minute);
+  const lambdaRem = rate * remMin; // expected saves still to come
+  const proj = saves + lambdaRem;
+  const need = Math.ceil(line) - saves; // saves still required to clear the line
+  const pOver = need <= 0 ? 1 : 1 - poissonCdf(need - 1, lambdaRem);
+  return { proj, lambdaRem, pOver, need, line, settled: false };
+}
+
 // --- The Odds API: live multi-book odds (FanDuel + best-of-book line shopping) ---
 // Cache to stay under the free tier's 500-request quota: refetch at most every 2 min.
 let _oddsCache = { at: 0, events: null };
@@ -363,6 +408,13 @@ function renderMatch(ev, sum, liveOdds) {
     }
   }
 
+  // recommended bets — a compact live read shown every refresh during play. The fuller
+  // breakdown (run of play + reasoning) appears at halftime via the halftime read.
+  if (state === "in" && st.type.name !== "STATUS_HALFTIME") {
+    const recLines = recommendedBetsLive(ev, sum, liveOdds);
+    if (recLines.length) lines.push(...recLines, "");
+  }
+
   // group standings — table for this match's group, with both teams highlighted
   const group = sum.standings?.groups?.[0];
   if (group?.standings?.entries?.length) {
@@ -385,15 +437,29 @@ function renderMatch(ev, sum, liveOdds) {
     }
   }
   if (keepers.length) {
-    lines.push(c("bold", "  Goalkeepers"));
+    const minute = matchMinute(st);
+    lines.push(c("bold", "  Goalkeepers") + c("dim", "   saves: live · proj to FT · O/U 2.5 (model estimate, not a book line)"));
     for (const k of keepers) {
       const saves = k.saves ?? 0;
       const ga = k.goalsConceded ?? 0;
-      lines.push(
-        `  ${c("bold", (k.abbr || "").padEnd(4))}${k.name.padEnd(24)} ` +
-        `${c("green", `${saves} save${saves === 1 ? "" : "s"}`.padEnd(8))}  ` +
-        c("dim", `${ga} conceded, ${k.shotsFaced ?? 0} shots faced`)
-      );
+      const base =
+        `  ${c("bold", (k.abbr || "").padEnd(4))}${k.name.padEnd(22)} ` +
+        `${c("green", `${saves} save${saves === 1 ? "" : "s"}`.padEnd(8))} ` +
+        c("dim", `${ga} GA, ${k.shotsFaced ?? 0} faced`);
+      // model-derived saves line — projection to full time + over/under 2.5 with fair odds
+      const ln = keeperSaveLine(saves, minute, state);
+      let proj = "";
+      if (ln && !ln.settled) {
+        const odds = probToAmerican(ln.pOver);
+        const pct = Math.round(ln.pOver * 100);
+        const ou = ln.need <= 0
+          ? c("green", `O${ln.line} ✓ hit`)
+          : `O${ln.line} ${pct}%${odds != null ? c("dim", ` (${fmtAmerican(odds)})`) : ""}`;
+        proj = c("dim", "  ·  proj ") + ln.proj.toFixed(1) + "  " + ou;
+      } else if (ln && ln.settled) {
+        proj = c("dim", `  ·  final ${saves}  `) + (ln.over ? c("green", `O${ln.line} ✓`) : c("dim", `O${ln.line} ✗`));
+      }
+      lines.push(base + proj);
     }
     lines.push("");
   }
@@ -424,17 +490,18 @@ function renderMatch(ev, sum, liveOdds) {
   return lines.join("\n");
 }
 
-// Halftime read: compare the run of play (xG-proxy, shots, possession, corners)
-// against the score and the live market price, and surface betting *considerations*.
-// These are heuristics, not a system that beats the books — framed honestly.
-function halftimeRead(ev, sum, liveOdds) {
+// Betting model: compare the run of play (xG-proxy, shots, possession, corners) against
+// the score and the live market price, and surface betting *considerations*. Each rec has
+// a compact `bet` (for the live section) and a full `text` (for the halftime read). These
+// are heuristics, not a system that beats the books — framed honestly throughout.
+function bettingModel(ev, sum, liveOdds) {
   const comp = ev.competitions[0];
   const home = comp.competitors.find((t) => t.homeAway === "home");
   const away = comp.competitors.find((t) => t.homeAway === "away");
   const teams = sum.boxscore?.teams || [];
   const hs = statMap(teams.find((t) => t.team.id === home.team.id) || teams[0] || {});
   const as = statMap(teams.find((t) => t.team.id === away.team.id) || teams[1] || {});
-  if (!Object.keys(hs).length) return [];
+  if (!Object.keys(hs).length) return null;
   const n = (v) => parseFloat(v) || 0;
   const hScore = Number(home.score) || 0, aScore = Number(away.score) || 0;
   const HA = home.team.abbreviation, AA = away.team.abbreviation;
@@ -472,17 +539,11 @@ function halftimeRead(ev, sum, liveOdds) {
     };
   }
 
-  const out = [];
-  out.push(c("bold", c("yellow", "  ── HALFTIME READ ──")));
-  out.push(
-    `  Run of play: ${c("bold", domLeader.abbr)} on top (${domLeader.dom}% control)` +
-    c("dim", `   xG ${HA} ${hX.toFixed(2)} – ${aX.toFixed(2)} ${AA}   score ${hScore}-${aScore}`)
-  );
-
   // build considerations
   const recs = [];
   const leadByScore = hScore === aScore ? null : hScore > aScore ? "home" : "away";
   const domSide = domLeader.side, domAbbr = domLeader.abbr, domPct = domLeader.dom;
+  const totalShots = n(hs.totalShots) + n(as.totalShots);
   const priceFor = (side) => (mkt ? `${fmtAmerican(mkt[side].price)} (${mkt[side].prob}%)` : "no live price");
 
   // 1) dominant side not yet ahead → they're the better team, second half favors them
@@ -490,6 +551,7 @@ function halftimeRead(ev, sum, liveOdds) {
     const strong = domPct >= 67;
     recs.push({
       conf: strong ? "Strong lean" : "Lean",
+      bet: `${c("bold", domAbbr)} to win @ ${c("green", priceFor(domSide))}`,
       text:
         `${c("bold", domAbbr)} to win the match @ ${c("green", priceFor(domSide))} — ` +
         `controlling the game (${domPct}%, xG edge) but ${leadByScore ? "trailing" : "level"}; ` +
@@ -501,6 +563,7 @@ function halftimeRead(ev, sum, liveOdds) {
   if (domPct >= 58 && leadByScore === domSide) {
     recs.push({
       conf: "Low value",
+      bet: `${c("bold", domAbbr)} win — fair but priced in (${priceFor(domSide)})`,
       text:
         `${c("bold", domAbbr)} are both ahead and on top — the price (${priceFor(domSide)}) already reflects it. ` +
         `Fair, but little edge left.`,
@@ -511,14 +574,16 @@ function halftimeRead(ev, sum, liveOdds) {
   if (combinedX >= 1.3 && hScore + aScore <= 2) {
     recs.push({
       conf: "Lean",
+      bet: `Over goals / BTTS — ${combinedX.toFixed(2)} xG, only ${hScore + aScore} scored`,
       text:
         `Over goals / both-teams-to-score — ${combinedX.toFixed(2)} combined xG with chances flowing ` +
-        `(${n(hs.totalShots) + n(as.totalShots)} shots) but only ${hScore + aScore} scored so far. ` +
+        `(${totalShots} shots) but only ${hScore + aScore} scored so far. ` +
         c("dim", "(no live totals price on the free tier — directional)"),
     });
-  } else if (combinedX < 0.6 && n(hs.totalShots) + n(as.totalShots) <= 6) {
+  } else if (combinedX < 0.6 && totalShots <= 6) {
     recs.push({
       conf: "Lean",
+      bet: `Under goals / draw-no-bet — sterile (${combinedX.toFixed(2)} xG)`,
       text:
         `Under goals / draw-no-bet — sterile half (${combinedX.toFixed(2)} combined xG, few clear chances). ` +
         c("dim", "(directional)"),
@@ -527,12 +592,43 @@ function halftimeRead(ev, sum, liveOdds) {
 
   // 4) tight & even → no edge
   if (!recs.length) {
-    recs.push({ conf: "No edge", text: "Even contest with no clear trend-vs-price gap — nothing stands out. Sit this one out." });
+    recs.push({
+      conf: "No edge",
+      bet: "No clear edge — sit this one out",
+      text: "Even contest with no clear trend-vs-price gap — nothing stands out. Sit this one out.",
+    });
   }
 
-  const confColor = (cf) =>
-    cf.startsWith("Strong") ? c("green", cf) : cf === "Lean" ? c("cyan", cf) : c("dim", cf);
-  for (const r of recs) out.push(`  ${confColor(`[${r.conf}]`)} ${r.text}`);
+  return { recs, domLeader, hX, aX, combinedX, HA, AA, hScore, aScore };
+}
+
+// compact live recommended-bets read, shown on every refresh during play. The fuller
+// breakdown (run of play + reasoning) appears at halftime via halftimeRead.
+function recommendedBetsLive(ev, sum, liveOdds) {
+  const m = bettingModel(ev, sum, liveOdds);
+  if (!m) return [];
+  const out = [
+    c("bold", "  Recommended bets") +
+    c("dim", `  (model lean: ${m.domLeader.abbr} ${m.domLeader.dom}% control — heuristic, stake small)`),
+  ];
+  // prefer actionable leans; fall back to whatever the model produced
+  const actionable = m.recs.filter((r) => r.conf === "Strong lean" || r.conf === "Lean");
+  const picks = (actionable.length ? actionable : m.recs).slice(0, 2);
+  for (const r of picks) out.push(`  ${confTag(r.conf)} ${r.bet}`);
+  return out;
+}
+
+// Halftime read: the expanded version — run of play, full reasoning, and disclaimer.
+function halftimeRead(ev, sum, liveOdds) {
+  const m = bettingModel(ev, sum, liveOdds);
+  if (!m) return [];
+  const out = [];
+  out.push(c("bold", c("yellow", "  ── HALFTIME READ ──")));
+  out.push(
+    `  Run of play: ${c("bold", m.domLeader.abbr)} on top (${m.domLeader.dom}% control)` +
+    c("dim", `   xG ${m.HA} ${m.hX.toFixed(2)} – ${m.aX.toFixed(2)} ${m.AA}   score ${m.hScore}-${m.aScore}`)
+  );
+  for (const r of m.recs) out.push(`  ${confTag(r.conf)} ${r.text}`);
   out.push(c("dim", "  ⚠ Heuristic read, not financial advice. Odds are -EV on average; stake small."));
   return out;
 }

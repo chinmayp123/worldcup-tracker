@@ -36,7 +36,8 @@ While tracking, the screen refreshes in place with the live score, match clock, 
 - **Score and clock** — live minute, halftime, full time
 - **Possession bar** — visual split between the two teams
 - **Stats table** — the leading team's number is bolded per stat
-- **Goalkeepers** — each keeper's saves, goals conceded, and shots faced (includes subbed-in keepers)
+- **Goalkeepers** — each keeper's saves, goals conceded, and shots faced (includes subbed-in keepers), plus a **model-derived saves line**: projected total saves at full time and an over/under 2.5 probability with fair odds. No sportsbook in the feed offers a keeper-saves market, so this is clearly labeled as a model estimate, not a book price.
+- **Recommended bets** — a compact live read shown on every refresh: the model's strongest lean(s) with a confidence tag (color-coded), derived from the run-of-play dominance index vs. the live market price. The fuller breakdown with reasoning appears at halftime (see below). Heuristic, clearly labeled — not a tip service.
 - **Pre-match odds** — moneyline for each outcome with vig-stripped implied win probabilities, plus spread and over/under. Note: ESPN's free API only carries the opening line, not live in-play odds.
 - **Group standings** — the live group table (rank, played, W-D-L, goal difference, points) with both teams in the current match highlighted
 - **Match events** — goals ⚽, yellow 🟨 / red 🟥 cards, substitutions 🔁, with minute and player
