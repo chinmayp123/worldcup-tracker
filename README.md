@@ -34,6 +34,7 @@ While tracking, the screen refreshes in place with the live score, match clock, 
 ## What it shows
 
 - **Score and clock** — live minute, halftime, full time
+- **Predicted final** — a model score prediction with a most-likely scoreline and win/draw/win probabilities. Pre-match it's market-based (expected goal total split by the favourite's implied edge); once live it's driven by the run of play (each side's xG rate blended toward a neutral prior, trusting the observed rate more as the match wears on). Labeled as a model estimate, with an early/low-confidence flag in the opening exchanges.
 - **Possession bar** — visual split between the two teams
 - **Stats table** — the leading team's number is bolded per stat
 - **Goalkeepers** — each keeper's saves, goals conceded, and shots faced (includes subbed-in keepers), plus a **model-derived saves line**: projected total saves at full time and an over/under 2.5 probability with fair odds. No sportsbook in the feed offers a keeper-saves market, so this is clearly labeled as a model estimate, not a book price.

@@ -75,6 +75,13 @@ function poissonCdf(k, lambda) {
   for (let i = 1; i <= k; i++) { term *= lambda / i; sum += term; }
   return sum;
 }
+// Poisson PMF P(X=k) — used by the score-prediction outcome distribution
+function poissonPmf(k, lambda) {
+  if (k < 0) return 0;
+  let t = Math.exp(-lambda);
+  for (let i = 1; i <= k; i++) t *= lambda / i;
+  return t;
+}
 // fair American odds from a probability (no vig) — for model-derived lines, not a book price
 function probToAmerican(p) {
   if (!(p > 0) || p >= 1) return null;
@@ -111,6 +118,90 @@ function keeperSaveLine(saves, minute, state, line = 2.5) {
   const need = Math.ceil(line) - saves; // saves still required to clear the line
   const pOver = need <= 0 ? 1 : 1 - poissonCdf(need - 1, lambdaRem);
   return { proj, lambdaRem, pOver, need, line, settled: false };
+}
+
+// independent-Poisson outcome distribution given expected REMAINING goals for each side
+// plus the goals already on the board — returns [pHomeWin, pDraw, pAwayWin]
+function outcomeProbs(remLamH, remLamA, hScore, aScore) {
+  let pH = 0, pD = 0, pA = 0;
+  for (let i = 0; i <= 10; i++)
+    for (let j = 0; j <= 10; j++) {
+      const p = poissonPmf(i, remLamH) * poissonPmf(j, remLamA);
+      const fh = hScore + i, fa = aScore + j;
+      if (fh > fa) pH += p; else if (fh < fa) pA += p; else pD += p;
+    }
+  const s = pH + pD + pA || 1;
+  return [pH / s, pD / s, pA / s];
+}
+
+// vig-stripped implied [home, draw, away] win probs from live FanDuel odds, falling back
+// to ESPN's pre-match line; null if neither is available
+function impliedFromOdds(sum, liveOdds) {
+  if (liveOdds) {
+    const sH = liveOdds.swapped ? "away" : "home", sA = liveOdds.swapped ? "home" : "away";
+    const price = (slot) => liveOdds.book(slot, "fanduel")?.price;
+    const raw = [price(sH), price("draw"), price(sA)].map(ml2prob);
+    if (raw[0] != null) { const s = raw.reduce((a, b) => a + (b || 0), 0) || 1; return raw.map((p) => (p || 0) / s); }
+  }
+  const odds = (sum.pickcenter || sum.odds || [])[0];
+  if (odds && odds.homeTeamOdds?.moneyLine != null) {
+    const raw = [ml2prob(odds.homeTeamOdds.moneyLine), ml2prob(odds.drawOdds?.moneyLine), ml2prob(odds.awayTeamOdds?.moneyLine)];
+    const s = raw.reduce((a, b) => a + (b || 0), 0) || 1;
+    return raw.map((p) => (p || 0) / s);
+  }
+  return null;
+}
+
+// model score prediction: run-of-play (each side's xG rate blended toward a neutral prior,
+// weighted by minutes played) once a live match has stats; otherwise market-implied (an
+// expected goal total split by the favourite's edge). A most-likely scoreline, not a lock.
+function scorePrediction(ev, sum, liveOdds) {
+  const comp = ev.competitions[0];
+  const home = comp.competitors.find((t) => t.homeAway === "home");
+  const away = comp.competitors.find((t) => t.homeAway === "away");
+  const st = comp.status, state = st.type.state;
+  if (state === "post") return null; // match over — show the real score, not a guess
+  const minute = matchMinute(st);
+  const hScore = Number(home.score) || 0, aScore = Number(away.score) || 0;
+  const FT = 95, AVG_TEAM = 1.35; // ~World Cup expected goals per team per match
+  const n = (v) => parseFloat(v) || 0;
+
+  const teams = sum.boxscore?.teams || [];
+  const hs = statMap(teams.find((t) => t.team.id === home.team.id) || teams[0] || {});
+  const as = statMap(teams.find((t) => t.team.id === away.team.id) || teams[1] || {});
+  const haveStats = Object.keys(hs).length > 0;
+  const xg = (s) => n(s.shotsOnTarget) * 0.33 + Math.max(0, n(s.totalShots) - n(s.shotsOnTarget)) * 0.04;
+
+  let remLamH, remLamA, basis;
+  if (state === "in" && haveStats && minute != null && minute > 0) {
+    // run of play: extrapolate each side's xG rate, blended toward a neutral prior,
+    // trusting the observed rate more as the match wears on
+    const elapsed = Math.max(minute, 1), remMin = Math.max(0, FT - minute);
+    const w = Math.min(1, elapsed / 70);
+    const priorRem = AVG_TEAM * (remMin / 90);
+    remLamH = w * ((xg(hs) / elapsed) * remMin) + (1 - w) * priorRem;
+    remLamA = w * ((xg(as) / elapsed) * remMin) + (1 - w) * priorRem;
+    basis = "run of play";
+  } else {
+    // market-based: split an expected total by the favourite's implied edge
+    const probs = impliedFromOdds(sum, liveOdds);
+    const odds = (sum.pickcenter || sum.odds || [])[0];
+    const remMin = state === "pre" ? 90 : Math.max(0, FT - (minute ?? 0));
+    const total = (Number(odds?.overUnder) || 2.7) * (remMin / 90);
+    const sup = probs ? 2.2 * (probs[0] - probs[2]) * (remMin / 90) : 0;
+    remLamH = Math.max(0.05, (total + sup) / 2);
+    remLamA = Math.max(0.05, (total - sup) / 2);
+    basis = "from market";
+  }
+
+  const expH = hScore + remLamH, expA = aScore + remLamA;
+  const [wH, wD, wA] = outcomeProbs(remLamH, remLamA, hScore, aScore);
+  const early = state === "pre" || (minute != null && minute < 25);
+  return {
+    basis, early,
+    ph: Math.round(expH), pa: Math.round(expA),
+    expH, expA, wH, wD, wA,
+  };
 }
 
 // --- The Odds API: live multi-book odds (FanDuel + best-of-book line shopping) ---
@@ -308,6 +399,17 @@ function renderMatch(ev, sum, liveOdds) {
   lines.push(`  ${c("bold", home.team.displayName)}  ${c("bold", `${home.score ?? 0} - ${away.score ?? 0}`)}  ${c("bold", away.team.displayName)}    ${clock}`);
   lines.push(c("dim", `  ${comp.venue?.fullName || ""}   updated ${new Date().toLocaleTimeString()}`));
   lines.push("");
+
+  // model score prediction — market-based pre-match, run-of-play once live
+  const pred = scorePrediction(ev, sum, liveOdds);
+  if (pred) {
+    lines.push(c("bold", "  Predicted final") + c("dim", `   (${pred.basis} — model est.${pred.early ? ", early / low confidence" : ""})`));
+    lines.push(
+      `  ${c("cyan", home.team.abbreviation)} ${c("bold", `${pred.ph} - ${pred.pa}`)} ${c("magenta", away.team.abbreviation)}` +
+      c("dim", `   exp ${pred.expH.toFixed(1)} - ${pred.expA.toFixed(1)}   ·   win prob ${home.team.abbreviation} ${Math.round(pred.wH * 100)}% / Draw ${Math.round(pred.wD * 100)}% / ${away.team.abbreviation} ${Math.round(pred.wA * 100)}%`)
+    );
+    lines.push("");
+  }
 
   // stats table
   const teams = sum.boxscore?.teams || [];
