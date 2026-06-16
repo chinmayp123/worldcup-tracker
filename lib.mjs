@@ -251,6 +251,23 @@ export function keeperSaveLine(saves, minute, state, line = 2.5) {
   return { proj, lambdaRem, pOver, need, line, settled: false };
 }
 
+// model-derived corners line per side + total O/U. Corners per side ARE real live data
+// (ESPN box score); there's no corners betting market in the feed, so the O/U is a model
+// estimate. Extrapolate each side's corner rate to full time; price the total via Poisson.
+export function cornersModel(hC, aC, minute, state, line = 9.5) {
+  const FT = 95;
+  if (state === "post") { const total = hC + aC; return { settled: true, home: hC, away: aC, total, over: total > line, line }; }
+  if (minute == null) return null; // pre-match: no corners yet
+  const elapsed = Math.max(minute, 10);
+  const remMin = Math.max(0, FT - minute);
+  const projH = hC + (hC / elapsed) * remMin;
+  const projA = aC + (aC / elapsed) * remMin;
+  const lambdaRemTotal = ((hC + aC) / elapsed) * remMin;
+  const need = Math.ceil(line) - (hC + aC);
+  const pOver = need <= 0 ? 1 : 1 - poissonCdf(need - 1, lambdaRemTotal);
+  return { settled: false, home: hC, away: aC, projH, projA, totalProj: projH + projA, pOver, need, line, odds: probToAmerican(pOver) };
+}
+
 export function outcomeProbs(remLamH, remLamA, hScore, aScore) {
   let pH = 0, pD = 0, pA = 0;
   for (let i = 0; i <= 10; i++)
@@ -529,6 +546,14 @@ export function buildMatchView(ev, sum, liveOdds) {
     }
   }
 
+  // corners per side + model total O/U (per-side counts are real live data)
+  let corners = null;
+  if (Object.keys(hs).length) {
+    const hC = parseInt(hs.wonCorners || 0, 10) || 0;
+    const aC = parseInt(as.wonCorners || 0, 10) || 0;
+    corners = cornersModel(hC, aC, minute, state);
+  }
+
   // prediction + recommended bets — run-of-play model once live, market-based pre-match
   const prediction = scorePrediction(ev, sum, liveOdds);
   const model = bettingModel(ev, sum, liveOdds);
@@ -595,7 +620,7 @@ export function buildMatchView(ev, sum, liveOdds) {
   return {
     id: ev.id, state, halftime, minute, statusText, venue: comp.venue?.fullName || "",
     home: teamObj(home), away: teamObj(away),
-    possession, stats, odds, prediction, recs, recsBasis, dominance, keepers, group, events,
+    possession, stats, odds, prediction, recs, recsBasis, dominance, keepers, corners, group, events,
   };
 }
 

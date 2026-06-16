@@ -7,7 +7,7 @@ const fs = require("fs");
 const { pathToFileURL } = require("url");
 
 const STATE_FILE = path.join(app.getPath("userData"), "widget-state.json");
-const DEFAULTS = { x: null, y: null, expanded: false, query: null, pinned: true };
+const DEFAULTS = { x: null, y: null, expanded: false, query: null, pinned: true, openAtLogin: true };
 function loadState() {
   try { return { ...DEFAULTS, ...JSON.parse(fs.readFileSync(STATE_FILE, "utf8")) }; }
   catch { return { ...DEFAULTS }; }
@@ -84,6 +84,18 @@ async function poll() {
   timer = setTimeout(poll, nextDelay);
 }
 
+// register (or clear) the widget as a Windows login item. In dev this launches electron.exe
+// with the app path; once packaged it points at the built exe automatically.
+function applyOpenAtLogin() {
+  try {
+    app.setLoginItemSettings({
+      openAtLogin: !!state.openAtLogin,
+      path: process.execPath,
+      args: [path.resolve(__dirname, "main.cjs")],
+    });
+  } catch {}
+}
+
 function buildTray() {
   // a tiny generated icon so the widget has a tray presence (show/hide/quit)
   const img = nativeImage.createFromDataURL(
@@ -95,6 +107,11 @@ function buildTray() {
     { label: "Show / hide", click: () => { if (win?.isVisible()) win.hide(); else win?.show(); } },
     { label: "Refresh now", click: () => poll() },
     { type: "separator" },
+    {
+      label: "Start with Windows", type: "checkbox", checked: !!state.openAtLogin,
+      click: (item) => { saveState({ openAtLogin: item.checked }); applyOpenAtLogin(); },
+    },
+    { type: "separator" },
     { label: "Quit", click: () => app.quit() },
   ]);
   tray.setContextMenu(menu);
@@ -105,6 +122,7 @@ app.whenReady().then(async () => {
   await loadLib();
   createWindow();
   buildTray();
+  applyOpenAtLogin();
   poll();
 });
 

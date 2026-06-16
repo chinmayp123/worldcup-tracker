@@ -202,6 +202,29 @@ function renderMatch(m) {
         ]));
       }
     }
+    if (m.corners) {
+      const cor = m.corners;
+      blocks.push(h("div", { class: "label", text: "Corners · per side + total O/U (model est.)" }));
+      if (cor.settled) {
+        blocks.push(h("div", { class: "gk" }, [
+          h("span", { text: `${m.home.abbr} ${cor.home} · ${m.away.abbr} ${cor.away}` }),
+          h("span", { class: "est", text: `final ${cor.total} · O${cor.line} ${cor.over ? "✓" : "✗"}` }),
+        ]));
+      } else {
+        blocks.push(h("div", { class: "gk" }, [
+          h("span", { text: `${m.home.abbr} ${cor.home} → proj ${cor.projH.toFixed(1)}` }),
+          h("span", { text: `${cor.projA.toFixed(1)} ← ${cor.away} ${m.away.abbr}`, class: "est" }),
+        ]));
+        const ou = cor.need <= 0
+          ? `O${cor.line} ✓ hit`
+          : `O${cor.line} ${Math.round(cor.pOver * 100)}%${cor.odds != null ? ` (${cor.odds > 0 ? "+" : ""}${cor.odds})` : ""}`;
+        blocks.push(h("div", { class: "gk" }, [
+          h("span", { text: `total proj ${cor.totalProj.toFixed(1)}` }),
+          h("span", { class: "est", text: ou }),
+        ]));
+      }
+    }
+
     if (m.playerProps && (m.playerProps.scorers.length || m.playerProps.sot.length)) {
       const pp = m.playerProps;
       // FanDuel price first; flag another book with ▲ only when it actually beats FanDuel
