@@ -202,6 +202,38 @@ function renderMatch(m) {
         ]));
       }
     }
+    if (m.playerProps && (m.playerProps.scorers.length || m.playerProps.sot.length)) {
+      const pp = m.playerProps;
+      // FanDuel price first; flag another book with ▲ only when it actually beats FanDuel
+      const priceEl = (pv) => {
+        if (pv.primary) {
+          const span = h("span", { class: "est", text: `FD ${pv.primary}` });
+          if (pv.beats && pv.best) span.appendChild(h("span", { class: "up", text: `  ▲ ${pv.best} ${bookName(pv.bestBook)}` }));
+          return span;
+        }
+        return h("span", { class: "est", text: pv.best ? `${pv.best} ${bookName(pv.bestBook)} (no FD)` : "" });
+      };
+      if (pp.scorers.length) {
+        blocks.push(h("div", { class: "label", text: "Anytime scorer · FanDuel" }));
+        for (const s of pp.scorers.slice(0, 5)) {
+          const pctTxt = s.prob != null ? `${Math.round(s.prob * 100)}% devig` : `${Math.round((s.price.implied || 0) * 100)}%`;
+          blocks.push(h("div", { class: "gk" }, [
+            h("span", { text: `${s.player} · ${pctTxt}` }),
+            priceEl(s.price),
+          ]));
+        }
+      }
+      if (pp.sot.length) {
+        blocks.push(h("div", { class: "label", text: "Shots on target · FanDuel · de-vigged" }));
+        for (const s of pp.sot.slice(0, 5)) {
+          blocks.push(h("div", { class: "gk" }, [
+            h("span", { text: `${s.player} O${s.line} · ${Math.round(s.fairOver * 100)}%` }),
+            priceEl(s.price),
+          ]));
+        }
+      }
+    }
+
     if (m.group) {
       blocks.push(h("div", { class: "label", text: m.group.header }));
       const tbl = h("table", { class: "grp" });

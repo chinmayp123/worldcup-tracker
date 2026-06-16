@@ -8,7 +8,8 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
 export const BASE = "https://site.api.espn.com/apis/site/v2/sports/soccer/fifa.world";
-const ODDS_BASE = "https://api.the-odds-api.com/v4/sports/soccer_fifa_world_cup/odds";
+const SPORT_BASE = "https://api.the-odds-api.com/v4/sports/soccer_fifa_world_cup";
+const ODDS_BASE = `${SPORT_BASE}/odds`;
 
 // Optional live-odds key (The Odds API). Read from env or a gitignored config file next to
 // this module — never hard-coded, so the public repo stays clean.
@@ -68,6 +69,99 @@ export async function fetchOddsEvents() {
   _oddsCache = { at: now, events: await res.json() };
   oddsState.remaining = res.headers.get("x-requests-remaining");
   return _oddsCache.events;
+}
+
+// --- player props (The Odds API per-event endpoint) ---
+// Real book markets, de-vigged. No saves/corners market exists for soccer; the props that
+// DO exist are goal-scorer, shots, shots-on-target, assists, cards. We pull scorer + SoT.
+// Cached per event (2 min) to respect the free-tier quota. Player props may require a paid
+// plan — on a free key the request can 401/422, which we swallow (section just stays empty).
+const PROP_MARKETS = "player_goal_scorer_anytime,player_shots_on_target";
+const _propCache = new Map(); // oddsEventId -> { at, data }
+const bestPrice = (arr) => arr.reduce((b, x) => (b == null || x.price > b.price ? x : b), null);
+// the book the user actually bets on — shown first; others only flagged when they beat it
+export const PRIMARY_BOOK = "fanduel";
+
+// pick the primary book's price for a side, plus the best elsewhere and whether it beats primary
+function priceView(side) {
+  const fd = side.find((x) => x.book === PRIMARY_BOOK);
+  const best = bestPrice(side);
+  return {
+    primary: fd ? fmtAmerican(fd.price) : null,
+    primaryRaw: fd ? fd.price : null,
+    best: best ? fmtAmerican(best.price) : null,
+    bestBook: best?.book || null,
+    bestRaw: best ? best.price : null,
+    beats: best && fd ? best.price > fd.price : !!best && !fd, // another book wins (or FD absent)
+    implied: fd ? ml2prob(fd.price) : best ? ml2prob(best.price) : null,
+  };
+}
+
+// fair probability of side A, by de-vigging each book's two-sided price then averaging
+function devigPair(sideA, sideB) {
+  const mapB = new Map(sideB.map((x) => [x.book, x.price]));
+  const probs = [];
+  for (const a of sideA) {
+    const bp = mapB.get(a.book);
+    if (bp == null) continue;
+    const pa = ml2prob(a.price), pb = ml2prob(bp);
+    if (pa == null || pb == null) continue;
+    probs.push(pa / (pa + pb)); // multiplicative de-vig
+  }
+  return probs.length ? probs.reduce((x, y) => x + y, 0) / probs.length : null;
+}
+
+function parsePlayerProps(ev) {
+  if (!ev || !ev.bookmakers) return { scorers: [], sot: [] };
+  const scorerAgg = new Map();  // player -> { player, yes:[], no:[] }
+  const sotAgg = new Map();     // `player|line` -> { player, line, over:[], under:[] }
+  for (const bk of ev.bookmakers) {
+    for (const mk of bk.markets || []) {
+      if (mk.key === "player_goal_scorer_anytime") {
+        for (const o of mk.outcomes || []) {
+          const p = o.description || o.name;
+          if (!p) continue;
+          const rec = scorerAgg.get(p) || { player: p, yes: [], no: [] };
+          rec[/^no$/i.test(o.name) ? "no" : "yes"].push({ book: bk.key, price: o.price });
+          scorerAgg.set(p, rec);
+        }
+      } else if (mk.key === "player_shots_on_target") {
+        for (const o of mk.outcomes || []) {
+          const p = o.description;
+          if (!p) continue;
+          const key = `${p}|${o.point}`;
+          const rec = sotAgg.get(key) || { player: p, line: o.point, over: [], under: [] };
+          rec[/under/i.test(o.name) ? "under" : "over"].push({ book: bk.key, price: o.price });
+          sotAgg.set(key, rec);
+        }
+      }
+    }
+  }
+  const scorers = [...scorerAgg.values()]
+    .map((r) => ({ player: r.player, prob: devigPair(r.yes, r.no), price: priceView(r.yes), twoSided: r.no.length > 0 }))
+    .filter((s) => s.price.primary || s.price.best)
+    .sort((a, b) => (b.prob ?? b.price.implied ?? 0) - (a.prob ?? a.price.implied ?? 0))
+    .slice(0, 6);
+  const sot = [...sotAgg.values()]
+    .map((r) => ({ player: r.player, line: r.line, fairOver: devigPair(r.over, r.under), price: priceView(r.over) }))
+    .filter((s) => (s.price.primary || s.price.best) && s.fairOver != null)
+    .sort((a, b) => b.fairOver - a.fairOver)
+    .slice(0, 6);
+  return { scorers, sot };
+}
+
+export async function fetchPlayerProps(oddsEventId) {
+  if (!ODDS_KEY || !oddsEventId) return null;
+  const now = Date.now();
+  const hit = _propCache.get(oddsEventId);
+  if (hit && now - hit.at < 120000) return hit.data;
+  const url = `${SPORT_BASE}/events/${oddsEventId}/odds?apiKey=${ODDS_KEY}&regions=us&markets=${PROP_MARKETS}&oddsFormat=american`;
+  const res = await fetch(url, { headers: { "User-Agent": "worldcup-cli" } });
+  if (!res.ok) throw new Error(`Odds API props HTTP ${res.status}`);
+  oddsState.remaining = res.headers.get("x-requests-remaining");
+  const data = parsePlayerProps(await res.json());
+  _propCache.set(oddsEventId, { at: now, data });
+  return data;
 }
 
 const normTeam = (s) => (s || "").toLowerCase().replace(/[^a-z]/g, "").replace(/^(the)/, "");
@@ -563,7 +657,13 @@ export async function getWidgetState(query) {
         liveOdds = matchOdds(await fetchOddsEvents(), h.team.displayName, a.team.displayName);
       } catch { /* fall back to ESPN pre-match */ }
     }
-    return { match: buildMatchView(ev, sum, liveOdds), matches };
+    const view = buildMatchView(ev, sum, liveOdds);
+    // attach real de-vigged player props for the displayed match (best-effort)
+    if (liveOdds?.ev?.id) {
+      try { view.playerProps = await fetchPlayerProps(liveOdds.ev.id); }
+      catch { view.playerProps = null; }
+    }
+    return { match: view, matches };
   } catch (e) {
     return { error: String(e?.message || e), matches: [] };
   }
