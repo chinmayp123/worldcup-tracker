@@ -140,6 +140,14 @@ function renderMatch(m) {
         h("span", { class: "txt", text: expanded ? r.text : r.bet }),
       ]));
     }
+    // model-vs-market divergence (live) — surfaced as a gap, not a promise of value
+    const v = m.valueEdges && m.valueEdges[0];
+    if (v && v.edge >= 0.08) {
+      blocks.push(h("div", { class: "rec" }, [
+        h("span", { class: "tag Lean", text: "Model gap" }),
+        h("span", { class: "txt", text: `${v.label}: model ${Math.round(v.model * 100)}% vs market ${Math.round(v.mkt * 100)}% (+${Math.round(v.edge * 100)}%)${expanded ? " — divergence, not a guarantee" : ""}` }),
+      ]));
+    }
   }
 
   // ---- full-only sections ----

@@ -565,6 +565,17 @@ export function buildMatchView(ev, sum, liveOdds) {
   }
   const dominance = model ? { leader: model.domLeader.abbr, pct: model.domLeader.dom } : null;
 
+  // model-vs-market gap (live only): where the run-of-play model's win prob diverges from
+  // the de-vigged market price. A divergence signal, NOT a guaranteed edge.
+  let valueEdges = null;
+  if (state === "in" && prediction && odds && odds.home?.prob != null) {
+    valueEdges = [
+      { label: home.team.abbreviation, model: prediction.wH, mkt: odds.home.prob / 100 },
+      { label: "Draw", model: prediction.wD, mkt: odds.draw?.prob != null ? odds.draw.prob / 100 : null },
+      { label: away.team.abbreviation, model: prediction.wA, mkt: odds.away?.prob != null ? odds.away.prob / 100 : null },
+    ].filter((s) => s.mkt != null).map((s) => ({ ...s, edge: s.model - s.mkt })).sort((a, b) => b.edge - a.edge);
+  }
+
   // keepers with model saves line
   const keepers = [];
   for (const r of sum.rosters || []) {
@@ -620,7 +631,7 @@ export function buildMatchView(ev, sum, liveOdds) {
   return {
     id: ev.id, state, halftime, minute, statusText, venue: comp.venue?.fullName || "",
     home: teamObj(home), away: teamObj(away),
-    possession, stats, odds, prediction, recs, recsBasis, dominance, keepers, corners, group, events,
+    possession, stats, odds, prediction, recs, recsBasis, dominance, valueEdges, keepers, corners, group, events,
   };
 }
 
