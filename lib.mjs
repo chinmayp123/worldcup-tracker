@@ -63,7 +63,7 @@ export async function fetchOddsEvents() {
   if (!ODDS_KEY) return null;
   const now = Date.now();
   if (_oddsCache.events && now - _oddsCache.at < 120000) return _oddsCache.events;
-  const url = `${ODDS_BASE}/?apiKey=${ODDS_KEY}&regions=us&markets=h2h&oddsFormat=american`;
+  const url = `${ODDS_BASE}/?apiKey=${ODDS_KEY}&regions=us&markets=h2h,totals&oddsFormat=american`;
   const res = await fetch(url, { headers: { "User-Agent": "worldcup-cli" } });
   if (!res.ok) throw new Error(`Odds API HTTP ${res.status}`);
   _oddsCache = { at: now, events: await res.json() };
@@ -624,6 +624,42 @@ export function buildMatchView(ev, sum, liveOdds) {
   };
 }
 
+// quick market-based predicted scoreline for a match, from an odds-API event's consensus
+// h2h + totals lines. Cheap enough to run for every row in the picker. null if no odds.
+function marketPrediction(oddsEv, homeName) {
+  if (!oddsEv) return null;
+  const homeP = [], drawP = [], awayP = [];
+  let totalLine = null;
+  for (const bk of oddsEv.bookmakers || []) {
+    const h2h = (bk.markets || []).find((m) => m.key === "h2h");
+    if (h2h) {
+      let ph, pd, pa;
+      for (const o of h2h.outcomes || []) {
+        if (/draw/i.test(o.name)) pd = ml2prob(o.price);
+        else if (teamsMatch(o.name, oddsEv.home_team)) ph = ml2prob(o.price);
+        else pa = ml2prob(o.price);
+      }
+      if (ph != null && pa != null) {
+        const s = ph + (pd || 0) + pa || 1;
+        homeP.push(ph / s); drawP.push((pd || 0) / s); awayP.push(pa / s);
+      }
+    }
+    if (totalLine == null) {
+      const pt = (bk.markets || []).find((m) => m.key === "totals")?.outcomes?.find((o) => o.point != null)?.point;
+      if (pt != null) totalLine = pt;
+    }
+  }
+  if (!homeP.length) return null;
+  const avg = (a) => a.reduce((x, y) => x + y, 0) / a.length;
+  let pH = avg(homeP), pD = avg(drawP), pA = avg(awayP);
+  if (teamsMatch(oddsEv.away_team, homeName)) { const t = pH; pH = pA; pA = t; } // map to ESPN home/away
+  const total = totalLine != null ? Number(totalLine) : 2.7;
+  const sup = 2.2 * (pH - pA);
+  const lamH = Math.max(0.05, (total + sup) / 2), lamA = Math.max(0.05, (total - sup) / 2);
+  const [wH, wD, wA] = outcomeProbs(lamH, lamA, 0, 0);
+  return { ph: Math.round(lamH), pa: Math.round(lamA), wH, wD, wA };
+}
+
 // today's matches (today + N days) as lightweight rows for a picker
 export async function listMatchesData({ days = 3 } = {}) {
   const boards = await Promise.all(
@@ -634,16 +670,28 @@ export async function listMatchesData({ days = 3 } = {}) {
     for (const ev of b.events || [])
       if (!seen.has(ev.id)) { seen.add(ev.id); events.push(ev); }
   events.sort((a, b) => new Date(a.date) - new Date(b.date));
+  // one cached odds fetch covers every row's predicted scoreline
+  let oddsEvents = null;
+  if (ODDS_KEY) { try { oddsEvents = await fetchOddsEvents(); } catch { /* no predictions */ } }
   return events.map((ev) => {
     const comp = ev.competitions[0];
     const home = comp.competitors.find((t) => t.homeAway === "home");
     const away = comp.competitors.find((t) => t.homeAway === "away");
     const state = comp.status.type.state;
+    let pred = null;
+    if (oddsEvents) {
+      const hn = home.team.displayName, an = away.team.displayName;
+      const oe = oddsEvents.find((e) =>
+        (teamsMatch(e.home_team, hn) && teamsMatch(e.away_team, an)) ||
+        (teamsMatch(e.home_team, an) && teamsMatch(e.away_team, hn)));
+      pred = marketPrediction(oe, hn);
+    }
     return {
       id: ev.id, date: ev.date, state,
       home: home.team.displayName, homeAbbr: home.team.abbreviation, homeScore: Number(home.score) || 0,
       away: away.team.displayName, awayAbbr: away.team.abbreviation, awayScore: Number(away.score) || 0,
       live: state === "in", statusText: state === "in" ? (comp.status.displayClock || "LIVE") : state === "post" ? "FT" : null,
+      pred,
     };
   });
 }

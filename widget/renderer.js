@@ -307,9 +307,12 @@ function renderPicker(matches) {
   const wrap = h("div", { class: "pick" });
   if (!matches.length) { wrap.appendChild(h("div", { class: "center muted", text: "No matches found." })); return wrap; }
 
+  wrap.appendChild(h("div", { class: "muted pick-hint", text: "middle = predicted final (model)" }));
+
   // auto-track option
   wrap.appendChild(h("div", { class: "row", onclick: () => choose(null) }, [
     h("span", { class: "l", text: "↻ Auto (live game)" }),
+    h("span", { class: "pred-mini", text: "" }),
     h("span", { class: "r", text: "default" }),
   ]));
 
@@ -319,8 +322,11 @@ function renderPicker(matches) {
     if (day !== curDay) { curDay = day; wrap.appendChild(h("div", { class: "day", text: day })); }
     const score = mt.state === "pre" ? "vs" : `${mt.homeScore}–${mt.awayScore}`;
     const right = mt.live ? mt.statusText : mt.state === "post" ? "FT" : new Date(mt.date).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+    const predTxt = mt.pred ? `${mt.pred.ph}–${mt.pred.pa}` : "";
+    const predTitle = mt.pred ? `predicted: ${mt.homeAbbr} ${Math.round(mt.pred.wH * 100)}% / Draw ${Math.round(mt.pred.wD * 100)}% / ${mt.awayAbbr} ${Math.round(mt.pred.wA * 100)}%` : "";
     wrap.appendChild(h("div", { class: "row", onclick: () => choose(mt.id) }, [
       h("span", { class: "l", text: `${mt.homeAbbr} ${score} ${mt.awayAbbr}` }),
+      h("span", { class: "pred-mini", text: predTxt, title: predTitle }),
       h("span", { class: `r ${mt.live ? "live" : ""}`, text: right }),
     ]));
   }

@@ -121,6 +121,8 @@ td.lead { font-weight: 700; color: #fff; }
 .pick .row .r { color: var(--muted); }
 .pick .row .r.live { color: var(--green); font-weight: 600; }
 .pick .day { font-size: 10px; letter-spacing: .1em; text-transform: uppercase; color: var(--muted); margin: 10px 0 3px; }
+.pick .pred-mini { color: var(--accent); font-weight: 700; font-size: 12px; text-align: center; flex: 0 0 auto; }
+.pick-hint { font-size: 10px; margin-bottom: 4px; text-align: right; }
 
 .disc { margin-top: 14px; font-size: 10px; color: #5c6675; line-height: 1.4; }
 
