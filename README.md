@@ -18,7 +18,27 @@ Live FIFA World Cup 2026 match tracker for your terminal. Zero dependencies — 
    34'  ⚽ GOAL CAN Jonathan David
 ```
 
-## Usage
+## Desktop widget
+
+A frameless, always-on-top desktop widget (Electron) is included alongside the CLI. It
+reuses the same data + model layer (`lib.mjs`), so scores, odds, predictions, recommended
+bets, and keeper-saves projections stay in sync with the terminal version.
+
+```sh
+npm install      # first time — pulls Electron
+npm run widget   # launch the floating widget
+```
+
+- **Compact by default** — status, score, predicted final + win-probability bar, top pick.
+- **Click ⤢ to expand** — adds possession, full stats, odds + line shopping, recommended
+  bets with reasoning, keeper saves projections, group table, and match events.
+- **Drag** by the title bar (position is remembered). Title-bar buttons: `≡` pick a match /
+  auto-track the live game · `⤢` expand · `📌` always-on-top · `—` hide to tray · `✕` quit.
+- Auto-refreshes every 30s (backs off to 2 min at halftime); falls back to the next
+  upcoming match when nothing is live. Picks show pre-match (market-based) and switch to
+  the live run-of-play read after kickoff.
+
+## CLI usage
 
 ```sh
 node worldcup.mjs              # auto-track the live game (or list today's matches)

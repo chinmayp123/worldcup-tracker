@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src https: data:; style-src 'self' 'unsafe-inline'; script-src 'self';" />
+<title>WorldCup</title>
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div id="app" class="widget compact">
+    <!-- drag bar / controls -->
+    <div class="bar">
+      <span class="title" id="title">WorldCup ⚽</span>
+      <span class="controls">
+        <button id="btn-pick" title="Pick match">≡</button>
+        <button id="btn-expand" title="Expand / collapse">⤢</button>
+        <button id="btn-pin" title="Always on top">📌</button>
+        <button id="btn-hide" title="Hide to tray">—</button>
+        <button id="btn-quit" title="Quit">✕</button>
+      </span>
+    </div>
+
+    <div class="body" id="body">
+      <div id="loading" class="muted center">Loading…</div>
+    </div>
+  </div>
+  <script src="renderer.js"></script>
+</body>
+</html>
