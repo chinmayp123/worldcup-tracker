@@ -15,6 +15,7 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
+import { fotmobXG } from "./fotmob.mjs";
 
 const BASE = "https://site.api.espn.com/apis/site/v2/sports/soccer/fifa.world";
 
@@ -155,7 +156,7 @@ function impliedFromOdds(sum, liveOdds) {
 // model score prediction: run-of-play (each side's xG rate blended toward a neutral prior,
 // weighted by minutes played) once a live match has stats; otherwise market-implied (an
 // expected goal total split by the favourite's edge). A most-likely scoreline, not a lock.
-function scorePrediction(ev, sum, liveOdds) {
+function scorePrediction(ev, sum, liveOdds, realXG = null) {
   const comp = ev.competitions[0];
   const home = comp.competitors.find((t) => t.homeAway === "home");
   const away = comp.competitors.find((t) => t.homeAway === "away");
@@ -179,9 +180,12 @@ function scorePrediction(ev, sum, liveOdds) {
     const elapsed = Math.max(minute, 1), remMin = Math.max(0, FT - minute);
     const w = Math.min(1, elapsed / 70);
     const priorRem = AVG_TEAM * (remMin / 90);
-    remLamH = w * ((xg(hs) / elapsed) * remMin) + (1 - w) * priorRem;
-    remLamA = w * ((xg(as) / elapsed) * remMin) + (1 - w) * priorRem;
-    basis = "run of play";
+    const useReal = realXG && typeof realXG.home?.xg === "number";
+    const cumH = useReal ? realXG.home.xg : xg(hs);
+    const cumA = useReal ? realXG.away.xg : xg(as);
+    remLamH = w * ((cumH / elapsed) * remMin) + (1 - w) * priorRem;
+    remLamA = w * ((cumA / elapsed) * remMin) + (1 - w) * priorRem;
+    basis = useReal ? "run of play · real xG" : "run of play";
   } else {
     // market-based: split an expected total by the favourite's implied edge
     const probs = impliedFromOdds(sum, liveOdds);
@@ -378,7 +382,7 @@ function eventIcon(type) {
   return c("dim", "•");
 }
 
-function renderMatch(ev, sum, liveOdds) {
+function renderMatch(ev, sum, liveOdds, realXG = null) {
   const comp = ev.competitions[0];
   const home = comp.competitors.find((t) => t.homeAway === "home");
   const away = comp.competitors.find((t) => t.homeAway === "away");
@@ -401,7 +405,7 @@ function renderMatch(ev, sum, liveOdds) {
   lines.push("");
 
   // model score prediction — market-based pre-match, run-of-play once live
-  const pred = scorePrediction(ev, sum, liveOdds);
+  const pred = scorePrediction(ev, sum, liveOdds, realXG);
   if (pred) {
     lines.push(c("bold", "  Predicted final") + c("dim", `   (${pred.basis} — model est.${pred.early ? ", early / low confidence" : ""})`));
     lines.push(
@@ -448,6 +452,24 @@ function renderMatch(ev, sum, liveOdds) {
       const hl = Number(hn ?? hv) > Number(an ?? av) ? c("bold", hPad) : hPad;
       const al = Number(an ?? av) > Number(hn ?? hv) ? c("bold", aPad) : aPad;
       lines.push(`  ${hl} ${c("dim", padC(label, W_LABEL + 2))} ${al}`);
+    }
+    lines.push("");
+  }
+
+  // expected goals — real shot-level xG from FotMob (free); falls back silently when absent
+  if (realXG && typeof realXG.home?.xg === "number") {
+    const hx = realXG.home, ax = realXG.away;
+    lines.push(c("bold", "  Expected goals") + c("dim", "   FotMob — real shot xG"));
+    lines.push(
+      `  ${c("cyan", home.team.abbreviation)} ${c("bold", hx.xg.toFixed(2))}` +
+      c("dim", ` (${hx.shots}sh/${hx.sot}ot)`) +
+      `  –  ${c("magenta", away.team.abbreviation)} ${c("bold", ax.xg.toFixed(2))}` +
+      c("dim", ` (${ax.shots}sh/${ax.sot}ot)`)
+    );
+    for (const p of (realXG.players || []).slice(0, 4)) {
+      if (p.xg < 0.05) continue;
+      const ab = p.side === "home" ? home.team.abbreviation : away.team.abbreviation;
+      lines.push(c("dim", `    ${ab} ${p.name}${p.goals ? " ⚽" + p.goals : ""}  ${p.xg.toFixed(2)} xG · ${p.sot}ot`));
     }
     lines.push("");
   }
@@ -513,7 +535,7 @@ function renderMatch(ev, sum, liveOdds) {
   // recommended bets — a compact live read shown every refresh during play. The fuller
   // breakdown (run of play + reasoning) appears at halftime via the halftime read.
   if (state === "in" && st.type.name !== "STATUS_HALFTIME") {
-    const recLines = recommendedBetsLive(ev, sum, liveOdds);
+    const recLines = recommendedBetsLive(ev, sum, liveOdds, realXG);
     if (recLines.length) lines.push(...recLines, "");
   }
 
@@ -544,10 +566,13 @@ function renderMatch(ev, sum, liveOdds) {
     for (const k of keepers) {
       const saves = k.saves ?? 0;
       const ga = k.goalsConceded ?? 0;
+      // ESPN's `shotsFaced` is unpopulated for keepers in this feed, but shots-on-target
+      // faced is an exact identity: every on-target shot is either saved or conceded.
+      const onTarget = k.shotsFaced || saves + ga;
       const base =
         `  ${c("bold", (k.abbr || "").padEnd(4))}${k.name.padEnd(22)} ` +
         `${c("green", `${saves} save${saves === 1 ? "" : "s"}`.padEnd(8))} ` +
-        c("dim", `${ga} GA, ${k.shotsFaced ?? 0} faced`);
+        c("dim", `${ga} GA, ${onTarget} on target`);
       // model-derived saves line — projection to full time + over/under 2.5 with fair odds
       const ln = keeperSaveLine(saves, minute, state);
       let proj = "";
@@ -576,7 +601,19 @@ function renderMatch(ev, sum, liveOdds) {
   });
   if (keyEvents.length) {
     lines.push(c("bold", "  Match events"));
-    for (const e of keyEvents.slice(-8)) {
+    // Always keep the scoreline-defining events (goals, penalties, red cards) — they're the
+    // point of the timeline. Fill the rest of a ~10-line budget with the most recent subs,
+    // yellows, and markers, then re-sort everything chronologically.
+    const MAX = 10;
+    const isKey = (e) => {
+      const t = (e.type?.text || "").toLowerCase();
+      return t.includes("goal") || t.includes("penalty") || t.includes("red");
+    };
+    const order = new Map(keyEvents.map((e, i) => [e, i]));
+    const mustShow = keyEvents.filter(isKey);
+    const fill = keyEvents.filter((e) => !isKey(e)).slice(-Math.max(0, MAX - mustShow.length));
+    const shown = [...mustShow, ...fill].sort((a, b) => order.get(a) - order.get(b));
+    for (const e of shown) {
       const minute = e.clock?.displayValue || "";
       const teamAbbr =
         e.team?.id === home.team.id ? home.team.abbreviation :
@@ -596,7 +633,7 @@ function renderMatch(ev, sum, liveOdds) {
 // the score and the live market price, and surface betting *considerations*. Each rec has
 // a compact `bet` (for the live section) and a full `text` (for the halftime read). These
 // are heuristics, not a system that beats the books — framed honestly throughout.
-function bettingModel(ev, sum, liveOdds) {
+function bettingModel(ev, sum, liveOdds, realXG = null) {
   const comp = ev.competitions[0];
   const home = comp.competitors.find((t) => t.homeAway === "home");
   const away = comp.competitors.find((t) => t.homeAway === "away");
@@ -608,14 +645,16 @@ function bettingModel(ev, sum, liveOdds) {
   const hScore = Number(home.score) || 0, aScore = Number(away.score) || 0;
   const HA = home.team.abbreviation, AA = away.team.abbreviation;
 
-  // crude xG proxy: shots on target are worth far more than off-target attempts
+  // real FotMob xG when available, else a crude proxy (on-target shots worth far more)
   const xg = (s) => n(s.shotsOnTarget) * 0.33 + Math.max(0, n(s.totalShots) - n(s.shotsOnTarget)) * 0.04;
-  const hX = xg(hs), aX = xg(as), combinedX = hX + aX;
+  const hX = typeof realXG?.home?.xg === "number" ? realXG.home.xg : xg(hs);
+  const aX = typeof realXG?.away?.xg === "number" ? realXG.away.xg : xg(as);
+  const combinedX = hX + aX;
 
   // dominance index: weighted share of the underlying numbers
   const share = (h, a) => { const t = h + a; return t ? h / t : 0.5; };
   const weights = [
-    [xg(hs), xg(as), 0.40],
+    [hX, aX, 0.40],
     [n(hs.shotsOnTarget), n(as.shotsOnTarget), 0.25],
     [n(hs.totalShots), n(as.totalShots), 0.15],
     [n(hs.possessionPct), n(as.possessionPct), 0.10],
@@ -706,8 +745,8 @@ function bettingModel(ev, sum, liveOdds) {
 
 // compact live recommended-bets read, shown on every refresh during play. The fuller
 // breakdown (run of play + reasoning) appears at halftime via halftimeRead.
-function recommendedBetsLive(ev, sum, liveOdds) {
-  const m = bettingModel(ev, sum, liveOdds);
+function recommendedBetsLive(ev, sum, liveOdds, realXG = null) {
+  const m = bettingModel(ev, sum, liveOdds, realXG);
   if (!m) return [];
   const out = [
     c("bold", "  Recommended bets") +
@@ -721,8 +760,8 @@ function recommendedBetsLive(ev, sum, liveOdds) {
 }
 
 // Halftime read: the expanded version — run of play, full reasoning, and disclaimer.
-function halftimeRead(ev, sum, liveOdds) {
-  const m = bettingModel(ev, sum, liveOdds);
+function halftimeRead(ev, sum, liveOdds, realXG = null) {
+  const m = bettingModel(ev, sum, liveOdds, realXG);
   if (!m) return [];
   const out = [];
   out.push(c("bold", c("yellow", "  ── HALFTIME READ ──")));
@@ -784,6 +823,19 @@ async function track(query, { once, interval }) {
       } catch { /* fall back to ESPN pre-match odds */ }
     }
 
+    // real shot-level xG from FotMob (free, no key) once the match has started
+    let realXG = null;
+    if (ev.competitions[0].status.type.state !== "pre") {
+      const comp = ev.competitions[0];
+      const h = comp.competitors.find((t) => t.homeAway === "home");
+      const a = comp.competitors.find((t) => t.homeAway === "away");
+      realXG = await fotmobXG(
+        { name: h.team.displayName, abbr: h.team.abbreviation },
+        { name: a.team.displayName, abbr: a.team.abbreviation },
+        ev.date,
+      );
+    }
+
     if (!once) process.stdout.write("\x1b[2J\x1b[3J\x1b[H"); // clear screen AND scrollback (3J) so stale frames don't linger above
     if (isGoal) {
       const comp = ev.competitions[0];
@@ -792,14 +844,14 @@ async function track(query, { once, interval }) {
       process.stdout.write("\x07"); // terminal bell
       console.log(c("green", c("bold", `\n  ⚽⚽⚽  GOAL!  ${h.team.abbreviation} ${h.score} - ${a.score} ${a.team.abbreviation}  ⚽⚽⚽\n`)));
     }
-    console.log(renderMatch(ev, sum, liveOdds));
+    console.log(renderMatch(ev, sum, liveOdds, realXG));
     const status = ev.competitions[0].status;
     if (once) break;
     if (status.type.state === "post") { console.log(c("dim", "  Match finished.\n")); break; }
     // during halftime, back off to a slow poll until the second half starts
     const halftime = status.type.name === "STATUS_HALFTIME";
     if (halftime) {
-      const read = halftimeRead(ev, sum, liveOdds);
+      const read = halftimeRead(ev, sum, liveOdds, realXG);
       if (read.length) console.log("\n" + read.join("\n") + "\n");
     }
     const wait = halftime ? Math.max(interval, 120) : interval;

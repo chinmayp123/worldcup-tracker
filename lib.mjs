@@ -6,6 +6,8 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
+import { fotmobXG, fotmobTeamRates, fetchFotmobFixtures } from "./fotmob.mjs";
+import { actionPublicBetting } from "./actionnetwork.mjs";
 
 export const BASE = "https://site.api.espn.com/apis/site/v2/sports/soccer/fifa.world";
 const SPORT_BASE = "https://api.the-odds-api.com/v4/sports/soccer_fifa_world_cup";
@@ -268,12 +270,25 @@ export function cornersModel(hC, aC, minute, state, line = 9.5) {
   return { settled: false, home: hC, away: aC, projH, projA, totalProj: projH + projA, pOver, need, line, odds: probToAmerican(pOver) };
 }
 
+// Dixon–Coles low-score dependence correction (rho ≈ -0.05): independent Poisson under-counts
+// 0-0/1-1 draws and over-counts 1-0/0-1. Applied only pre-kickoff (0-0), where it's the proper
+// full-match scoreline; once goals are in, the in-play rates already carry the dependence.
+const DC_RHO = -0.05;
+function dcTau(fh, fa, lamH, lamA) {
+  if (fh === 0 && fa === 0) return 1 - lamH * lamA * DC_RHO;
+  if (fh === 0 && fa === 1) return 1 + lamH * DC_RHO;
+  if (fh === 1 && fa === 0) return 1 + lamA * DC_RHO;
+  if (fh === 1 && fa === 1) return 1 - DC_RHO;
+  return 1;
+}
 export function outcomeProbs(remLamH, remLamA, hScore, aScore) {
+  const pre = hScore === 0 && aScore === 0;
   let pH = 0, pD = 0, pA = 0;
   for (let i = 0; i <= 10; i++)
     for (let j = 0; j <= 10; j++) {
-      const p = poissonPmf(i, remLamH) * poissonPmf(j, remLamA);
+      let p = poissonPmf(i, remLamH) * poissonPmf(j, remLamA);
       const fh = hScore + i, fa = aScore + j;
+      if (pre) p *= dcTau(fh, fa, remLamH, remLamA);
       if (fh > fa) pH += p; else if (fh < fa) pA += p; else pD += p;
     }
   const s = pH + pD + pA || 1;
@@ -296,8 +311,74 @@ export function impliedFromOdds(sum, liveOdds) {
   return null;
 }
 
-// model score prediction: run-of-play once live, market-implied pre-match
-export function scorePrediction(ev, sum, liveOdds) {
+// --- WC2026 venue conditions (host stadiums): altitude (m) + a heat-risk index (0 mild → 3
+// extreme), allowing for air-conditioned/retractable roofs. Matched loosely by name/city. ---
+const VENUES = [
+  { k: /lumen|seattle/i, alt: 5, heat: 0 },
+  { k: /gillette|foxboro|boston/i, alt: 90, heat: 1 },
+  { k: /lincoln financial|philadelphia/i, alt: 12, heat: 2 },
+  { k: /metlife|rutherford|new jersey|new york/i, alt: 5, heat: 2 },
+  { k: /at&t|arlington|dallas/i, alt: 150, heat: 1 },     // retractable roof + AC
+  { k: /nrg|houston/i, alt: 15, heat: 1 },                 // retractable roof + AC
+  { k: /arrowhead|kansas city/i, alt: 270, heat: 3 },
+  { k: /mercedes-benz|atlanta/i, alt: 320, heat: 1 },      // retractable roof + AC
+  { k: /hard rock|miami/i, alt: 2, heat: 3 },
+  { k: /levi'?s|santa clara|san francisco|bay/i, alt: 9, heat: 2 },
+  { k: /sofi|inglewood|los angeles/i, alt: 30, heat: 0 },  // covered
+  { k: /bmo|toronto/i, alt: 80, heat: 1 },
+  { k: /bc place|vancouver/i, alt: 3, heat: 0 },           // retractable roof
+  { k: /azteca|banorte|mexico city|ciudad de m/i, alt: 2240, heat: 1 },
+  { k: /akron|guadalajara|zapopan/i, alt: 1566, heat: 2 },
+  { k: /bbva|monterrey/i, alt: 500, heat: 3 },
+];
+function venueInfo(name, city) {
+  const s = `${name || ""} ${city || ""}`;
+  return VENUES.find((v) => v.k.test(s)) || null;
+}
+const HEAT_LABEL = ["mild", "warm", "hot", "extreme heat"];
+
+// per-match physical conditions from the schedule + venue: rest days for each side, and the
+// venue's altitude/heat. Returns a small λ tilt for the disadvantaged side (capped, since the
+// effect is real but noisy) plus display fields. Best-effort; null if data is missing.
+export async function matchConditions(ev, homeRef, awayRef) {
+  try {
+    const v = ev.competitions[0].venue;
+    const venue = venueInfo(v?.fullName, v?.address?.city);
+    const fixtures = await fetchFotmobFixtures();
+    const curMs = new Date(ev.date).getTime();
+    const restFor = (ref) => {
+      if (!fixtures?.length || !curMs) return null;
+      const played = fixtures.filter((f) => f.utcTime && new Date(f.utcTime).getTime() < curMs - 36e5 &&
+        (teamsMatch(f.home.name, ref.name) || (ref.abbr && teamsMatch(f.home.name, ref.abbr)) ||
+         teamsMatch(f.away.name, ref.name) || (ref.abbr && teamsMatch(f.away.name, ref.abbr))));
+      if (!played.length) return null;
+      played.sort((a, b) => new Date(b.utcTime) - new Date(a.utcTime));
+      return Math.max(0, Math.round((curMs - new Date(played[0].utcTime).getTime()) / 864e5));
+    };
+    const restH = restFor(homeRef), restA = restFor(awayRef);
+    // tilt: altitude saps pace for both sides; a short-rest side relative to the opponent is tilted down
+    let tH = 1, tA = 1;
+    if (venue && venue.alt >= 1500) { tH *= 0.96; tA *= 0.96; }
+    if (venue && venue.heat >= 3) { tH *= 0.98; tA *= 0.98; }
+    if (restH != null && restA != null) {
+      if (restH <= 3 && restA - restH >= 2) tH *= 0.97;
+      if (restA <= 3 && restH - restA >= 2) tA *= 0.97;
+    }
+    if (!venue && restH == null && restA == null) return null;
+    return {
+      venue: venue ? { name: v?.fullName || "", alt: venue.alt, heat: venue.heat, heatLabel: HEAT_LABEL[venue.heat] } : null,
+      home: { restDays: restH }, away: { restDays: restA },
+      tilt: { home: tH, away: tA },
+    };
+  } catch {
+    return null;
+  }
+}
+
+// model score prediction: run-of-play once live, market-implied pre-match.
+// realXG (FotMob, optional) replaces the shot proxy with true cumulative xG when present.
+// cond (optional) applies a small fatigue/altitude/heat tilt to expected goals.
+export function scorePrediction(ev, sum, liveOdds, realXG = null, priors = null, cond = null) {
   const comp = ev.competitions[0];
   const home = comp.competitors.find((t) => t.homeAway === "home");
   const away = comp.competitors.find((t) => t.homeAway === "away");
@@ -319,9 +400,12 @@ export function scorePrediction(ev, sum, liveOdds) {
     const elapsed = Math.max(minute, 1), remMin = Math.max(0, FT - minute);
     const w = Math.min(1, elapsed / 70);
     const priorRem = AVG_TEAM * (remMin / 90);
-    remLamH = w * ((xg(hs) / elapsed) * remMin) + (1 - w) * priorRem;
-    remLamA = w * ((xg(as) / elapsed) * remMin) + (1 - w) * priorRem;
-    basis = "run of play";
+    const useReal = realXG && typeof realXG.home?.xg === "number";
+    const cumH = useReal ? realXG.home.xg : xg(hs);
+    const cumA = useReal ? realXG.away.xg : xg(as);
+    remLamH = w * ((cumH / elapsed) * remMin) + (1 - w) * priorRem;
+    remLamA = w * ((cumA / elapsed) * remMin) + (1 - w) * priorRem;
+    basis = useReal ? "run of play · real xG" : "run of play";
   } else {
     const probs = impliedFromOdds(sum, liveOdds);
     const odds = (sum.pickcenter || sum.odds || [])[0];
@@ -331,19 +415,39 @@ export function scorePrediction(ev, sum, liveOdds) {
     remLamH = Math.max(0.05, (total + sup) / 2);
     remLamA = Math.max(0.05, (total - sup) / 2);
     basis = "from market";
+    // blend in each team's Round 1 xG form (FotMob) so the pregame line reflects how they
+    // actually played, not just the market — market gets the majority weight (1 game is noisy)
+    if (priors && state === "pre") {
+      remLamH = 0.55 * remLamH + 0.45 * priors.home;
+      remLamA = 0.55 * remLamA + 0.45 * priors.away;
+      basis = "market + R1 form";
+    }
   }
 
+  // WC2026 conditions tilt (altitude/heat/rest fatigue) — small, capped
+  if (cond && cond.home && cond.away) { remLamH *= cond.home; remLamA *= cond.away; }
   const expH = hScore + remLamH, expA = aScore + remLamA;
   const [wH, wD, wA] = outcomeProbs(remLamH, remLamA, hScore, aScore);
   const early = state === "pre" || (minute != null && minute < 25);
-  return { basis, early, ph: Math.round(expH), pa: Math.round(expA), expH, expA, wH, wD, wA };
+  // derived predictions (live-aware): goals already scored are certain, only the remaining
+  // expectation is random.  BTTS = each team scores ≥1 by full time.
+  const scored = hScore + aScore;
+  const pHomeScore = hScore >= 1 ? 1 : 1 - Math.exp(-remLamH);
+  const pAwayScore = aScore >= 1 ? 1 : 1 - Math.exp(-remLamA);
+  const pBTTS = pHomeScore * pAwayScore;
+  const needOver = Math.max(0, 3 - scored);
+  const pOver25 = needOver === 0 ? 1 : 1 - poissonCdf(needOver - 1, remLamH + remLamA);
+  return { basis, early, ph: Math.round(expH), pa: Math.round(expA), expH, expA, wH, wD, wA, pBTTS, pOver25, remLamH, remLamA };
 }
 
-// betting model: run-of-play dominance vs market price → considerations (bet + reasoning)
-export function bettingModel(ev, sum, liveOdds) {
+// betting model: run-of-play dominance vs market price → considerations (bet + reasoning).
+// realXG (FotMob, optional) feeds true xG into the dominance index and the goals reads.
+export function bettingModel(ev, sum, liveOdds, realXG = null, prediction = null) {
   const comp = ev.competitions[0];
   const home = comp.competitors.find((t) => t.homeAway === "home");
   const away = comp.competitors.find((t) => t.homeAway === "away");
+  const st = comp.status;
+  const halftime = st.type.name === "STATUS_HALFTIME";
   const teams = sum.boxscore?.teams || [];
   const hs = statMap(teams.find((t) => t.team.id === home.team.id) || teams[0] || {});
   const as = statMap(teams.find((t) => t.team.id === away.team.id) || teams[1] || {});
@@ -353,11 +457,13 @@ export function bettingModel(ev, sum, liveOdds) {
   const HA = home.team.abbreviation, AA = away.team.abbreviation;
 
   const xg = (s) => n(s.shotsOnTarget) * 0.33 + Math.max(0, n(s.totalShots) - n(s.shotsOnTarget)) * 0.04;
-  const hX = xg(hs), aX = xg(as), combinedX = hX + aX;
+  const hX = typeof realXG?.home?.xg === "number" ? realXG.home.xg : xg(hs);
+  const aX = typeof realXG?.away?.xg === "number" ? realXG.away.xg : xg(as);
+  const combinedX = hX + aX;
 
   const share = (h, a) => { const t = h + a; return t ? h / t : 0.5; };
   const weights = [
-    [xg(hs), xg(as), 0.40],
+    [hX, aX, 0.40],
     [n(hs.shotsOnTarget), n(as.shotsOnTarget), 0.25],
     [n(hs.totalShots), n(as.totalShots), 0.15],
     [n(hs.possessionPct), n(as.possessionPct), 0.10],
@@ -388,38 +494,46 @@ export function bettingModel(ev, sum, liveOdds) {
   const totalShots = n(hs.totalShots) + n(as.totalShots);
   const priceFor = (side) => (mkt ? `${fmtAmerican(mkt[side].price)} (${mkt[side].prob}%)` : "no live price");
 
-  if (domPct >= 60 && leadByScore !== domSide) {
-    const strong = domPct >= 67;
+  // looser thresholds at halftime — a full half of evidence and the 2nd-half market resets
+  const domT = halftime ? 55 : 60, domStrongT = halftime ? 62 : 67;
+  const whenLabel = halftime ? "first half" : "so far";
+  if (domPct >= domT && leadByScore !== domSide) {
     recs.push({
-      conf: strong ? "Strong lean" : "Lean",
+      conf: domPct >= domStrongT ? "Strong lean" : "Lean",
       bet: `${domAbbr} to win @ ${priceFor(domSide)}`,
       text:
         `${domAbbr} to win the match @ ${priceFor(domSide)} — controlling the game (${domPct}%, xG edge) ` +
         `but ${leadByScore ? "trailing" : "level"}; the run of play says they're the better side and haven't been rewarded yet.`,
     });
-  }
-  if (domPct >= 58 && leadByScore === domSide) {
+  } else if (domPct >= domT - 3 && leadByScore === domSide) {
     recs.push({
       conf: "Low value",
       bet: `${domAbbr} win — fair but priced in (${priceFor(domSide)})`,
-      text:
-        `${domAbbr} are both ahead and on top — the price (${priceFor(domSide)}) already reflects it. Fair, but little edge left.`,
+      text: `${domAbbr} are both ahead and on top — the price (${priceFor(domSide)}) already reflects it. Fair, but little edge left.`,
     });
   }
-  if (combinedX >= 1.3 && hScore + aScore <= 2) {
-    recs.push({
-      conf: "Lean",
-      bet: `Over goals / BTTS — ${combinedX.toFixed(2)} xG, only ${hScore + aScore} scored`,
-      text:
-        `Over goals / both-teams-to-score — ${combinedX.toFixed(2)} combined xG with chances flowing ` +
-        `(${totalShots} shots) but only ${hScore + aScore} scored so far. (no live totals price on the free tier — directional)`,
-    });
-  } else if (combinedX < 0.6 && totalShots <= 6) {
-    recs.push({
-      conf: "Lean",
-      bet: `Under goals / draw-no-bet — sterile (${combinedX.toFixed(2)} xG)`,
-      text: `Under goals / draw-no-bet — sterile half (${combinedX.toFixed(2)} combined xG, few clear chances). (directional)`,
-    });
+
+  // goals + BTTS reads from the model probabilities (live-aware). Directional — no live
+  // totals/BTTS market on the free tier — but they keep a read on the board at halftime.
+  const scored = hScore + aScore;
+  const bothScored = hScore >= 1 && aScore >= 1;
+  if (prediction) {
+    const ov = Math.round(prediction.pOver25 * 100);
+    if (prediction.pOver25 >= 0.56 && scored <= 2) {
+      recs.push({ conf: prediction.pOver25 >= 0.66 ? "Strong lean" : "Lean", bet: `Over 2.5 goals — model ${ov}%`,
+        text: `Over 2.5 goals — model ${ov}% (${combinedX.toFixed(2)} combined xG ${whenLabel}, ${scored} scored). Directional.` });
+    } else if (prediction.pOver25 <= 0.42) {
+      recs.push({ conf: "Lean", bet: `Under 2.5 goals — model ${100 - ov}%`,
+        text: `Under 2.5 goals — model ${100 - ov}% (sterile run of play, ${combinedX.toFixed(2)} combined xG ${whenLabel}). Directional.` });
+    }
+    const bt = Math.round(prediction.pBTTS * 100);
+    if (!bothScored && prediction.pBTTS >= 0.55) {
+      recs.push({ conf: prediction.pBTTS >= 0.66 ? "Strong lean" : "Lean", bet: `Both teams to score — model ${bt}%`,
+        text: `Both teams to score (Yes) — model ${bt}%; both sides creating (${hX.toFixed(2)} / ${aX.toFixed(2)} xG) and ${bothScored ? "both have scored" : "not both on the board yet"}. Directional.` });
+    } else if (!bothScored && prediction.pBTTS <= 0.38) {
+      recs.push({ conf: "Lean", bet: `Both teams to score: No — model ${100 - bt}%`,
+        text: `BTTS No — model ${100 - bt}%; one side offers little going forward (${hX.toFixed(2)} / ${aX.toFixed(2)} xG). Directional.` });
+    }
   }
   if (!recs.length) {
     recs.push({
@@ -472,8 +586,48 @@ export function prematchPicks(p, HA, AA) {
 
 // --- structured views (no ANSI / no DOM) for any front end ---
 
+// pregame projections from each team's Round 1 form (FotMob): expected corners O/U,
+// keeper-saves O/U, and xG priors to blend into the scoreline. null if rates unavailable.
+export async function pregameProjections(home, away) {
+  const [hr, ar] = await Promise.all([fotmobTeamRates(home), fotmobTeamRates(away)]);
+  if (!hr || !ar) return null;
+  const mean = (a, b) => (a + b) / 2;
+  // only one game has been played, so regularize each rate toward a tournament prior
+  // (50/50) — keeps a single 0-corner game from producing a nonsensical projection
+  const shrink = (v, prior) => (v + prior) / 2;
+  // corners: each side's expected count is the average of its own (shrunk) attacking rate and
+  // the opponent's (shrunk) conceding rate; total drives an O/U 9.5 via Poisson
+  const cH = mean(shrink(hr.cornersFor, 5), shrink(ar.cornersAgainst, 5));
+  const cA = mean(shrink(ar.cornersFor, 5), shrink(hr.cornersAgainst, 5));
+  const cTotal = cH + cA, cLine = 9.5;
+  const pOverC = 1 - poissonCdf(Math.floor(cLine), cTotal);
+  // keeper saves: expected shots-on-target faced minus expected goals conceded (xG proxy)
+  const sotFacedH = mean(shrink(ar.sotFor, 4), shrink(hr.sotAgainst, 4));
+  const sotFacedA = mean(shrink(hr.sotFor, 4), shrink(ar.sotAgainst, 4));
+  const gaH = mean(shrink(ar.xgFor, 1.3), shrink(hr.xgAgainst, 1.3));
+  const gaA = mean(shrink(hr.xgFor, 1.3), shrink(ar.xgAgainst, 1.3));
+  const savesH = Math.max(0, sotFacedH - gaH), savesA = Math.max(0, sotFacedA - gaA);
+  const sLine = 2.5;
+  // projected shots + shots on target per side (own attacking rate vs opponent conceding rate)
+  const shotsH = mean(shrink(hr.shotsFor, 12), shrink(ar.shotsAgainst, 12));
+  const shotsA = mean(shrink(ar.shotsFor, 12), shrink(hr.shotsAgainst, 12));
+  const sotH = mean(shrink(hr.sotFor, 4), shrink(ar.sotAgainst, 4));
+  const sotA = mean(shrink(ar.sotFor, 4), shrink(hr.sotAgainst, 4));
+  const pOverSH = 1 - poissonCdf(Math.floor(sLine), savesH), pOverSA = 1 - poissonCdf(Math.floor(sLine), savesA);
+  return {
+    basis: "R1 form",
+    shots: { home: { shots: shotsH, sot: sotH }, away: { shots: shotsA, sot: sotA } },
+    corners: { home: cH, away: cA, total: cTotal, line: cLine, pOver: pOverC, odds: probToAmerican(pOverC) },
+    saves: {
+      home: { proj: savesH, line: sLine, pOver: pOverSH, odds: probToAmerican(pOverSH) },
+      away: { proj: savesA, line: sLine, pOver: pOverSA, odds: probToAmerican(pOverSA) },
+    },
+    xgPrior: { home: mean(hr.xgFor, ar.xgAgainst), away: mean(ar.xgFor, hr.xgAgainst) },
+  };
+}
+
 // one match → a complete plain-data view (scores, stats, odds, prediction, recs, keepers, events)
-export function buildMatchView(ev, sum, liveOdds) {
+export function buildMatchView(ev, sum, liveOdds, realXG = null, publicBetting = null, priors = null, conditions = null) {
   const comp = ev.competitions[0];
   const home = comp.competitors.find((t) => t.homeAway === "home");
   const away = comp.competitors.find((t) => t.homeAway === "away");
@@ -490,6 +644,8 @@ export function buildMatchView(ev, sum, liveOdds) {
     id: t.team.id, name: t.team.displayName, abbr: t.team.abbreviation,
     score: state === "pre" ? null : Number(t.score) || 0,
     logo: t.team.logo || (t.team.logos && t.team.logos[0]?.href) || null,
+    color: t.team.color ? `#${t.team.color}` : null,
+    altColor: t.team.alternateColor ? `#${t.team.alternateColor}` : null,
   });
 
   // stats
@@ -533,6 +689,11 @@ export function buildMatchView(ev, sum, liveOdds) {
     };
     odds = { source: liveOdds.live ? "live" : "pre", reqLeft: oddsState.remaining,
       home: mk(slotHome, 0), draw: mk("draw", 1), away: mk(slotAway, 2) };
+  } else if (publicBetting?.fanduel) {
+    // real FanDuel moneyline via Action Network (free, no Odds API quota)
+    const f = publicBetting.fanduel;
+    const cell = (c) => ({ ml: fmtAmerican(c.ml), prob: c.prob });
+    odds = { source: "fanduel-an", home: cell(f.home), draw: cell(f.draw), away: cell(f.away) };
   } else {
     const o = (sum.pickcenter || sum.odds || [])[0];
     if (o && o.homeTeamOdds?.moneyLine != null) {
@@ -555,8 +716,8 @@ export function buildMatchView(ev, sum, liveOdds) {
   }
 
   // prediction + recommended bets — run-of-play model once live, market-based pre-match
-  const prediction = scorePrediction(ev, sum, liveOdds);
-  const model = bettingModel(ev, sum, liveOdds);
+  const prediction = scorePrediction(ev, sum, liveOdds, realXG, priors?.xgPrior, conditions?.tilt);
+  const model = bettingModel(ev, sum, liveOdds, realXG, prediction);
   let recs = model ? model.recs : [];
   let recsBasis = model ? "run of play" : null;
   if ((!recs || !recs.length) && prediction && state !== "post") {
@@ -568,12 +729,17 @@ export function buildMatchView(ev, sum, liveOdds) {
   // model-vs-market gap (live only): where the run-of-play model's win prob diverges from
   // the de-vigged market price. A divergence signal, NOT a guaranteed edge.
   let valueEdges = null;
-  if (state === "in" && prediction && odds && odds.home?.prob != null) {
+  if (prediction && state !== "post" && odds && odds.home?.prob != null) {
+    const dec = (mlStr) => { const ml = Number(mlStr); if (!ml) return null; return ml > 0 ? ml / 100 + 1 : 100 / -ml + 1; };
+    // half-Kelly stake (fraction of bankroll), capped at 5% — full Kelly is too aggressive and
+    // large model "edges" are usually model error, not real value
+    const kelly = (p, d) => { if (!d || d <= 1) return 0; const b = d - 1; return Math.min(0.05, Math.max(0, (b * p - (1 - p)) / b / 2)); };
     valueEdges = [
-      { label: home.team.abbreviation, model: prediction.wH, mkt: odds.home.prob / 100 },
-      { label: "Draw", model: prediction.wD, mkt: odds.draw?.prob != null ? odds.draw.prob / 100 : null },
-      { label: away.team.abbreviation, model: prediction.wA, mkt: odds.away?.prob != null ? odds.away.prob / 100 : null },
-    ].filter((s) => s.mkt != null).map((s) => ({ ...s, edge: s.model - s.mkt })).sort((a, b) => b.edge - a.edge);
+      { label: home.team.abbreviation, model: prediction.wH, mkt: odds.home.prob / 100, ml: odds.home.ml },
+      { label: "Draw", model: prediction.wD, mkt: odds.draw?.prob != null ? odds.draw.prob / 100 : null, ml: odds.draw?.ml },
+      { label: away.team.abbreviation, model: prediction.wA, mkt: odds.away?.prob != null ? odds.away.prob / 100 : null, ml: odds.away?.ml },
+    ].filter((s) => s.mkt != null).map((s) => { const d = dec(s.ml); return { ...s, edge: s.model - s.mkt, dec: d, kelly: kelly(s.model, d) }; })
+      .sort((a, b) => b.edge - a.edge);
   }
 
   // keepers with model saves line
@@ -628,10 +794,24 @@ export function buildMatchView(ev, sum, liveOdds) {
       players: (e.participants || []).map((p) => p.athlete?.displayName).filter(Boolean).join(", "),
     }));
 
+  // real xG (FotMob) for display — team totals (incl. xGOT / big chances) + top per-player
+  const xg = realXG && typeof realXG.home?.xg === "number"
+    ? {
+        source: realXG.source || "fotmob",
+        home: realXG.home, away: realXG.away, players: (realXG.players || []).slice(0, 6),
+        xgot: realXG.xgot || null, bigChances: realXG.bigChances || null, bigChancesMissed: realXG.bigChancesMissed || null,
+      }
+    : null;
+  // live pressure series, top performers, recent form — all from the same FotMob fetch
+  const momentum = realXG?.momentum?.length ? realXG.momentum : null;
+  const topPlayers = realXG?.topPlayers || null;
+  const form = realXG?.form || null;
+
   return {
     id: ev.id, state, halftime, minute, statusText, venue: comp.venue?.fullName || "",
     home: teamObj(home), away: teamObj(away),
-    possession, stats, odds, prediction, recs, recsBasis, dominance, valueEdges, keepers, corners, group, events,
+    possession, stats, xg, momentum, topPlayers, form, odds, prediction, recs, recsBasis, dominance, valueEdges,
+    publicBetting: publicBetting || null, pregameProj: priors || null, conditions: conditions || null, keepers, corners, group, events,
   };
 }
 
@@ -671,6 +851,25 @@ function marketPrediction(oddsEv, homeName) {
   return { ph: Math.round(lamH), pa: Math.round(lamA), wH, wD, wA };
 }
 
+// market-based predicted scoreline from ESPN's inline scoreboard odds (already on the row, so
+// no extra fetch). The picker's fallback when The Odds API is unavailable (e.g. quota used up).
+// home/away here are the ESPN home/away, so no swap is needed.
+function espnMarketPrediction(ev) {
+  const o = (ev.competitions?.[0]?.odds || [])[0];
+  const ml = o?.moneyline;
+  if (!ml) return null;
+  const px = (s) => { const v = s?.current?.odds ?? s?.close?.odds ?? s?.open?.odds; return v == null ? null : Number(v); };
+  const pH0 = ml2prob(px(ml.home)), pD0 = ml2prob(px(ml.draw)), pA0 = ml2prob(px(ml.away));
+  if (pH0 == null || pA0 == null) return null;
+  const s = pH0 + (pD0 || 0) + pA0 || 1;
+  const pH = pH0 / s, pA = pA0 / s;
+  const total = Number(o.overUnder) || 2.7;
+  const sup = 2.2 * (pH - pA);
+  const lamH = Math.max(0.05, (total + sup) / 2), lamA = Math.max(0.05, (total - sup) / 2);
+  const [wH, wD, wA] = outcomeProbs(lamH, lamA, 0, 0);
+  return { ph: Math.round(lamH), pa: Math.round(lamA), wH, wD, wA };
+}
+
 // today's matches (today + N days) as lightweight rows for a picker
 export async function listMatchesData({ days = 3 } = {}) {
   const boards = await Promise.all(
@@ -697,10 +896,13 @@ export async function listMatchesData({ days = 3 } = {}) {
         (teamsMatch(e.home_team, an) && teamsMatch(e.away_team, hn)));
       pred = marketPrediction(oe, hn);
     }
+    if (!pred) pred = espnMarketPrediction(ev); // fallback: ESPN's inline line (works without the Odds API)
     return {
       id: ev.id, date: ev.date, state,
       home: home.team.displayName, homeAbbr: home.team.abbreviation, homeScore: Number(home.score) || 0,
       away: away.team.displayName, awayAbbr: away.team.abbreviation, awayScore: Number(away.score) || 0,
+      homeLogo: home.team.logo || null, awayLogo: away.team.logo || null,
+      homeColor: home.team.color ? `#${home.team.color}` : null, awayColor: away.team.color ? `#${away.team.color}` : null,
       live: state === "in", statusText: state === "in" ? (comp.status.displayClock || "LIVE") : state === "post" ? "FT" : null,
       pred,
     };
@@ -741,7 +943,21 @@ export async function getWidgetState(query) {
         liveOdds = matchOdds(await fetchOddsEvents(), h.team.displayName, a.team.displayName);
       } catch { /* fall back to ESPN pre-match */ }
     }
-    const view = buildMatchView(ev, sum, liveOdds);
+    const comp0 = ev.competitions[0];
+    const h0 = comp0.competitors.find((t) => t.homeAway === "home");
+    const a0 = comp0.competitors.find((t) => t.homeAway === "away");
+    const homeRef = { name: h0.team.displayName, abbr: h0.team.abbreviation };
+    const awayRef = { name: a0.team.displayName, abbr: a0.team.abbreviation };
+    // real xG once live; Action Network splits + FanDuel odds always; pregame projections
+    // (corners/saves/xG priors from Round 1 form) only before kickoff — all best-effort, parallel
+    const isPre = comp0.status.type.state === "pre";
+    const [realXG, publicBetting, priors, conditions] = await Promise.all([
+      isPre ? Promise.resolve(null) : fotmobXG(homeRef, awayRef, ev.date),
+      actionPublicBetting(homeRef, awayRef),
+      isPre ? pregameProjections(homeRef, awayRef) : Promise.resolve(null),
+      matchConditions(ev, homeRef, awayRef),
+    ]);
+    const view = buildMatchView(ev, sum, liveOdds, realXG, publicBetting, priors, conditions);
     // attach real de-vigged player props for the displayed match (best-effort)
     if (liveOdds?.ev?.id) {
       try { view.playerProps = await fetchPlayerProps(liveOdds.ev.id); }
