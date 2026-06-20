@@ -11,3 +11,7 @@ node_modules/
 mockup.html
 .playwright-mcp/
 dist/
+
+# local morning-routine launchers (machine-specific paths)
+run-morning.bat
+run-morning.vbs

@@ -95,21 +95,21 @@ export async function generateDailyParlays(stake = 10, events = null) {
   return { date: new Date(sb.events?.[0]?.date || Date.now()).toISOString().slice(0, 10), stake, perGame, cross };
 }
 
-// a readable text block for the morning routine / log
+// a readable (ASCII-safe) text block for the morning routine / log
 export function formatParlays(out) {
   const pct = (p) => `${Math.round(p * 100)}%`;
-  const legLine = (l) => `    • ${l.game} — ${l.market}: ${l.pick} (${fmtAm(l.ml)}, model ${pct(l.modelProb)}, edge ${l.edge >= 0 ? "+" : ""}${Math.round(l.edge * 100)}%)`;
+  const legLine = (l) => `    - ${l.game} | ${l.market}: ${l.pick} (${fmtAm(l.ml)}, model ${pct(l.modelProb)}, edge ${l.edge >= 0 ? "+" : ""}${Math.round(l.edge * 100)}%)`;
   const parBlock = (title, p) => {
     if (!p) return `${title}: (not enough games)`;
-    const k = p.kelly > 0.002 ? `Kelly ${(p.kelly * 100).toFixed(1)}% of bankroll` : "Kelly: skip (−EV)";
+    const k = p.kelly > 0.002 ? `Kelly ${(p.kelly * 100).toFixed(1)}% of bankroll` : "Kelly: skip (-EV)";
     return [
-      `${title}  ${fmtAm(p.americanOdds)}  ($${p.stake} → $${p.payout.toFixed(2)})`,
+      `${title}  ${fmtAm(p.americanOdds)}  ($${p.stake} -> $${p.payout.toFixed(2)})`,
       ...p.legs.map(legLine),
-      `    combined model ${pct(p.modelProb)} · model EV ${p.ev >= 0 ? "+" : ""}$${p.ev.toFixed(2)} · ${k}`,
+      `    combined model ${pct(p.modelProb)} | model EV ${p.ev >= 0 ? "+" : ""}$${p.ev.toFixed(2)} | ${k}`,
     ].join("\n");
   };
-  const lines = [`World Cup parlays · ${out.date} · $${out.stake} each`, ""];
-  for (const g of out.perGame) lines.push(parBlock(`▸ ${g.game}`, g.parlay), "");
-  lines.push(parBlock("▸ ALL GAMES (one leg each)", out.cross));
+  const lines = [`World Cup parlays | ${out.date} | $${out.stake} each`, ""];
+  for (const g of out.perGame) lines.push(parBlock(`> ${g.game}`, g.parlay), "");
+  lines.push(parBlock("> ALL GAMES (one leg each)", out.cross));
   return lines.join("\n");
 }
