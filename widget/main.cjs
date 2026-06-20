@@ -7,7 +7,7 @@ const fs = require("fs");
 const { pathToFileURL } = require("url");
 
 const STATE_FILE = path.join(app.getPath("userData"), "widget-state.json");
-const DEFAULTS = { x: null, y: null, expanded: false, query: null, pinned: true, openAtLogin: true };
+const DEFAULTS = { x: null, y: null, expanded: false, query: null, pinned: true, openAtLogin: true, ew: null, eh: null };
 function loadState() {
   try { return { ...DEFAULTS, ...JSON.parse(fs.readFileSync(STATE_FILE, "utf8")) }; }
   catch { return { ...DEFAULTS }; }
@@ -19,7 +19,9 @@ function saveState(patch) {
 let state = loadState();
 
 const COMPACT = { width: 290, height: 250 };
-const EXPANDED = { width: 390, height: 640 };
+const EXPANDED = { width: 960, height: 940 };
+// the expanded size to use — the user's saved drag-size if they've resized, else the default
+const expandedSize = () => ({ width: state.ew || EXPANDED.width, height: state.eh || EXPANDED.height });
 
 let lib;       // lazily imported ESM module
 let win;
@@ -33,15 +35,18 @@ async function loadLib() {
 }
 
 function createWindow() {
-  const size = state.expanded ? EXPANDED : COMPACT;
+  const size = state.expanded ? expandedSize() : COMPACT;
   win = new BrowserWindow({
     width: size.width,
     height: size.height,
+    minWidth: 260,
+    minHeight: 220,
     x: state.x ?? undefined,
     y: state.y ?? undefined,
     frame: false,
     transparent: true,
-    resizable: false,
+    resizable: true,
+    minimizable: false, // it's a floating widget — minimizing a transparent window makes it vanish
     alwaysOnTop: state.pinned,
     skipTaskbar: false,
     fullscreenable: false,
@@ -60,6 +65,16 @@ function createWindow() {
     const [x, y] = win.getPosition();
     saveState({ x, y });
   });
+  // persist the expanded size when the user drag-resizes (so it stays put across launches);
+  // ignore resizes while compact so the compact preset isn't overwritten
+  win.on("resize", () => {
+    if (!state.expanded) return;
+    const [w, h] = win.getSize();
+    saveState({ ew: w, eh: h });
+  });
+  // belt-and-suspenders: if the OS ever forces a minimize (Win+D / Win+M) despite
+  // minimizable:false, bounce straight back — the widget should never vanish on its own.
+  win.on("minimize", () => { win.restore(); win.show(); });
   win.on("closed", () => { win = null; });
 
   // send the latest data once the page is ready
@@ -96,6 +111,14 @@ function applyOpenAtLogin() {
   } catch {}
 }
 
+// bring the widget back from hidden/minimized cleanly
+function showWidget() {
+  if (!win) return createWindow();
+  if (win.isMinimized()) win.restore();
+  win.show();
+  win.focus();
+}
+
 function buildTray() {
   // a tiny generated icon so the widget has a tray presence (show/hide/quit)
   const img = nativeImage.createFromDataURL(
@@ -104,7 +127,7 @@ function buildTray() {
   tray = new Tray(img);
   tray.setToolTip("WorldCup widget");
   const menu = Menu.buildFromTemplate([
-    { label: "Show / hide", click: () => { if (win?.isVisible()) win.hide(); else win?.show(); } },
+    { label: "Show / hide", click: () => { if (win?.isVisible()) win.hide(); else showWidget(); } },
     { label: "Refresh now", click: () => poll() },
     { type: "separator" },
     {
@@ -115,7 +138,7 @@ function buildTray() {
     { label: "Quit", click: () => app.quit() },
   ]);
   tray.setContextMenu(menu);
-  tray.on("click", () => { if (win?.isVisible()) win.hide(); else win?.show(); });
+  tray.on("click", () => { if (win?.isVisible()) win.hide(); else showWidget(); });
 }
 
 app.whenReady().then(async () => {
@@ -138,8 +161,8 @@ ipcMain.handle("set-match", (_e, query) => {
 ipcMain.handle("toggle-expand", () => {
   const expanded = !state.expanded;
   saveState({ expanded });
-  const size = expanded ? EXPANDED : COMPACT;
-  if (win) { win.setResizable(true); win.setSize(size.width, size.height, true); win.setResizable(false); }
+  const size = expanded ? expandedSize() : COMPACT;
+  if (win) win.setSize(size.width, size.height, true); // stays resizable so the user can drag it
   return expanded;
 });
 ipcMain.handle("toggle-pin", () => {
@@ -149,5 +172,5 @@ ipcMain.handle("toggle-pin", () => {
   return pinned;
 });
 ipcMain.handle("refresh", () => poll());
-ipcMain.handle("hide", () => win?.hide());
+ipcMain.handle("hide", () => win?.hide()); // no longer wired to a button; tray menu uses win.hide() directly
 ipcMain.handle("quit", () => app.quit());

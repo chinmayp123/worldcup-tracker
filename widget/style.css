@@ -1,11 +1,13 @@
 * { margin: 0; padding: 0; box-sizing: border-box; }
 :root {
-  --bg: rgba(17, 21, 28, 0.88);
-  --line: rgba(255,255,255,0.08);
-  --txt: #e8eaed;
-  --muted: #7c8694;
+  --bg: rgba(17, 21, 28, 0.92);
+  --line: rgba(255,255,255,0.10);
+  --txt: #eef1f5;
+  --muted: #9aa7b6;       /* lifted for readability on the dark glass bg */
   --accent: #7aa2ff;   /* home */
   --opp: #ff8fb3;      /* away */
+  --home: #7aa2ff;     /* per-match team colours, overridden from ESPN kit colours in JS */
+  --away: #ff8fb3;
   --green: #46d98a;
   --blue: #3a6df0;
   --pink: #e25c8a;
@@ -36,6 +38,8 @@ body {
   padding: 7px 10px; font-size: 11px; color: var(--muted);
   border-bottom: 1px solid var(--line); flex: 0 0 auto;
 }
+.brand { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.brand .logo { flex: 0 0 auto; display: block; }
 .bar .title { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .controls { -webkit-app-region: no-drag; display: flex; gap: 2px; }
 .controls button {
@@ -57,33 +61,39 @@ body {
 .live { color: var(--green); font-size: 12px; font-weight: 600; }
 .live.pre { color: var(--muted); }
 .live.ft { color: var(--muted); }
-.score-row { display: flex; align-items: baseline; gap: 9px; margin-top: 5px; }
-.team { font-size: 14px; font-weight: 600; color: #cfd6df; }
-.score { font-size: 28px; font-weight: 800; }
-.venue { font-size: 11px; color: var(--muted); margin-top: 2px; }
+.score-row { display: flex; align-items: center; justify-content: space-between; gap: 14px; margin-top: 8px; }
+.side { display: flex; align-items: center; gap: 11px; flex: 1 1 0; min-width: 0; }
+.side.home { justify-content: flex-start; }
+.side.away { justify-content: flex-end; }
+.team { font-size: 17px; font-weight: 700; color: #d7dde6; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.team.h { color: var(--home); } .team.a { color: var(--away); }
+.score { font-size: 30px; font-weight: 800; flex: 0 0 auto; letter-spacing: 1px; }
+.flag { width: 40px; height: 28px; object-fit: cover; border-radius: 3px; flex: 0 0 auto; box-shadow: 0 0 0 1px rgba(255,255,255,.18); }
+.venue { font-size: 11px; color: var(--muted); margin-top: 4px; }
 
 .label { font-size: 10px; letter-spacing: .13em; text-transform: uppercase; color: var(--muted); margin: 13px 0 5px; }
 
 /* prediction */
 .pred { font-size: 19px; font-weight: 800; }
-.pred .h { color: var(--accent); } .pred .a { color: var(--opp); }
+.pred .h { color: var(--home); } .pred .a { color: var(--away); }
 .pred .exp { font-size: 12px; font-weight: 500; color: var(--muted); margin-left: 4px; }
-.winbar { display: flex; height: 8px; border-radius: 5px; overflow: hidden; margin-top: 8px; }
-.winbar .h { background: var(--blue); } .winbar .d { background: #4b5563; } .winbar .a { background: var(--pink); }
-.winlegend { display: flex; justify-content: space-between; font-size: 11px; color: #9aa4b2; margin-top: 4px; }
+.winbar { display: flex; height: 9px; border-radius: 5px; overflow: hidden; margin-top: 8px; }
+.winbar .h { background: var(--home); } .winbar .d { background: #5b6678; } .winbar .a { background: var(--away); }
+.winlegend { display: flex; justify-content: space-between; font-size: 11px; color: #b3bdc9; margin-top: 4px; }
 
 /* tags */
 .tag { font-size: 9.5px; font-weight: 700; padding: 2px 6px; border-radius: 5px; margin-right: 7px; white-space: nowrap; }
 .tag.Lean { background: rgba(56,182,255,.16); color: #5bc0ff; }
 .tag.Strong { background: rgba(70,217,138,.16); color: var(--green); }
 .tag.Low, .tag.No { background: rgba(255,255,255,.08); color: var(--muted); }
+.tag.Sharp { background: rgba(255,176,32,.16); color: #ffb020; }
 .rec { font-size: 12.5px; margin-top: 7px; line-height: 1.35; display: flex; }
 .rec .txt { flex: 1; }
 
 /* possession + stats */
 .possrow { display: flex; justify-content: space-between; font-size: 12px; color: #aeb6c2; margin-bottom: 4px; }
 .possbar { display: flex; height: 8px; border-radius: 5px; overflow: hidden; }
-.possbar .h { background: var(--blue); } .possbar .a { background: var(--pink); }
+.possbar .h { background: var(--home); } .possbar .a { background: var(--away); }
 table { width: 100%; border-collapse: collapse; margin-top: 6px; font-size: 12.5px; }
 td { padding: 3px 0; }
 td.lbl { text-align: center; color: var(--muted); font-size: 11px; }
@@ -117,7 +127,10 @@ td.lead { font-weight: 700; color: #fff; }
   display: flex; justify-content: space-between; padding: 7px 8px; border-radius: 7px; cursor: pointer;
 }
 .pick .row:hover { background: rgba(255,255,255,.07); }
-.pick .row .l { color: #cfd6df; }
+.pick .row .l { color: #d7dde6; display: flex; align-items: center; gap: 7px; }
+.pick .l .flag { width: 19px; height: 13px; }
+.pick .pk-team { font-weight: 700; }
+.pick .pk-score { color: var(--muted); font-weight: 600; }
 .pick .row .r { color: var(--muted); }
 .pick .row .r.live { color: var(--green); font-weight: 600; }
 .pick .day { font-size: 10px; letter-spacing: .1em; text-transform: uppercase; color: var(--muted); margin: 10px 0 3px; }
@@ -129,3 +142,26 @@ td.lead { font-weight: 700; color: #fff; }
 /* sections hidden in compact mode */
 .full-only { display: none; }
 .widget.expanded .full-only { display: block; }
+
+/* expanded two-column card layout */
+.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 13px; margin-top: 13px; align-items: start; }
+.col { display: flex; flex-direction: column; gap: 13px; min-width: 0; }
+.card { background: rgba(255,255,255,.05); border: 1px solid var(--line); border-radius: 10px; padding: 10px 13px 12px; }
+.card > .label:first-child { margin-top: 0; }
+.grid2 ~ .card { margin-top: 13px; }
+
+/* momentum sparkline */
+.spark { display: flex; align-items: flex-end; gap: 1px; height: 46px; margin-top: 6px; }
+.spark .sb { flex: 1 1 0; min-width: 0; border-radius: 1px 1px 0 0; opacity: .9; }
+.spark .sb.h { background: var(--home); }
+.spark .sb.a { background: var(--away); }
+
+/* form dots */
+.formrow { display: inline-flex; gap: 3px; }
+.formdot { display: inline-flex; align-items: center; justify-content: center; width: 16px; height: 16px; border-radius: 4px; font-size: 9px; font-weight: 700; }
+.formdot.W { background: rgba(70,217,138,.18); color: var(--green); }
+.formdot.D { background: rgba(255,255,255,.1); color: var(--muted); }
+.formdot.L { background: rgba(226,92,138,.2); color: var(--pink); }
+
+/* small inline explainer under a section label */
+.hint { font-size: 10.5px; color: var(--muted); margin: -2px 0 5px; line-height: 1.35; }
