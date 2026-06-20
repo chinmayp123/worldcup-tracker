@@ -71,15 +71,15 @@ function extractMarket(game, key) {
   return null;
 }
 
-// FanDuel's moneyline for a game (book 69 first, then state variants) → { home, draw, away } prices
-function fanduelMoneyline(game) {
+// FanDuel's prices for a market (book 69 first, then state variants) → { side: {odds, line} }
+function fanduelMarket(game, key) {
   const markets = game.markets || {};
   for (const id of FANDUEL_IDS) {
-    const arr = markets[id]?.event?.moneyline || markets[id]?.moneyline;
+    const arr = markets[id]?.event?.[key] || markets[id]?.[key];
     if (!Array.isArray(arr)) continue;
     const by = {};
-    for (const o of arr) { if (o.side && o.odds != null && by[o.side] == null) by[o.side] = o.odds; }
-    if (by.home != null && by.away != null) return by;
+    for (const o of arr) { if (o.side && o.odds != null && by[o.side] == null) by[o.side] = { odds: o.odds, line: o.value ?? o.point ?? null }; }
+    if (Object.keys(by).length >= 2) return by;
   }
   return null;
 }
@@ -114,15 +114,20 @@ export async function actionPublicBetting(home, away) {
     const totalBy = extractMarket(g, "total");
     const total = totalBy ? { over: totalBy.over || null, under: totalBy.under || null, line: totalBy.over?.line ?? totalBy.under?.line ?? null } : null;
 
-    // real FanDuel moneyline (book 69), de-vigged, oriented to ESPN home/away
+    // real FanDuel prices (book 69): de-vigged moneyline (oriented) + total over/under for legs
     let fanduel = null;
-    const fd = fanduelMoneyline(g);
-    if (fd) {
-      const raw = [ml2p(fd.home), ml2p(fd.draw), ml2p(fd.away)];
+    const fdMl = fanduelMarket(g, "moneyline");
+    if (fdMl) {
+      const ml = { home: fdMl.home?.odds, draw: fdMl.draw?.odds, away: fdMl.away?.odds };
+      const raw = [ml2p(ml.home), ml2p(ml.draw), ml2p(ml.away)];
       const s = raw.reduce((x, y) => x + (y || 0), 0) || 1;
-      const cell = (ml, p) => ({ ml, prob: p != null ? Math.round((p / s) * 100) : null });
-      const H = cell(fd.home, raw[0]), D = cell(fd.draw, raw[1]), A = cell(fd.away, raw[2]);
-      fanduel = aligned ? { home: H, draw: D, away: A } : { home: A, draw: D, away: H };
+      const cell = (mlv, p) => ({ ml: mlv ?? null, prob: p != null ? Math.round((p / s) * 100) : null });
+      const H = cell(ml.home, raw[0]), D = cell(ml.draw, raw[1]), A = cell(ml.away, raw[2]);
+      const fdTot = fanduelMarket(g, "total");
+      fanduel = {
+        ...(aligned ? { home: H, draw: D, away: A } : { home: A, draw: D, away: H }),
+        total: fdTot ? { line: fdTot.over?.line ?? fdTot.under?.line ?? null, over: fdTot.over?.odds ?? null, under: fdTot.under?.odds ?? null } : null,
+      };
     }
 
     // signals: most-bet side (public) and the side with the largest money-over-tickets edge (sharp)

@@ -2,6 +2,9 @@
 odds.config.json
 .env
 
+# personal betting log — keep your picks/results out of the (public) repo
+bets/
+
 node_modules/
 
 # scratch / build

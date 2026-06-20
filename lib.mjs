@@ -497,13 +497,27 @@ export function bettingModel(ev, sum, liveOdds, realXG = null, prediction = null
   // looser thresholds at halftime — a full half of evidence and the 2nd-half market resets
   const domT = halftime ? 55 : 60, domStrongT = halftime ? 62 : 67;
   const whenLabel = halftime ? "first half" : "so far";
-  if (domPct >= domT && leadByScore !== domSide) {
+  // the scoreline model's win prob for the dominant side — gates the "to win" lean so it can
+  // never contradict the win bar (a side dominating but trailing late may have ~no real chance)
+  const WIN_FLOOR = 0.25;
+  const domWin = prediction ? (domSide === "home" ? prediction.wH : prediction.wA) : null;
+  if (domPct >= domT && leadByScore !== domSide && (domWin == null || domWin >= WIN_FLOOR)) {
     recs.push({
       conf: domPct >= domStrongT ? "Strong lean" : "Lean",
       bet: `${domAbbr} to win @ ${priceFor(domSide)}`,
       text:
         `${domAbbr} to win the match @ ${priceFor(domSide)} — controlling the game (${domPct}%, xG edge) ` +
-        `but ${leadByScore ? "trailing" : "level"}; the run of play says they're the better side and haven't been rewarded yet.`,
+        `but ${leadByScore ? "trailing" : "level"}${domWin != null ? `; scoreline model still gives them ${Math.round(domWin * 100)}%` : ""}. The run of play says they're the better side and haven't been rewarded yet.`,
+    });
+  } else if (domPct >= domT && leadByScore !== domSide && domWin != null && domWin < WIN_FLOOR) {
+    // dominant but trailing late — the scoreline model says the comeback is unlikely, so this is
+    // information, not a win lean (prevents the old "back TUR" vs "PAR 63%" contradiction)
+    recs.push({
+      conf: "Low value",
+      bet: `${domAbbr} on top but unlikely to recover — model ${Math.round(domWin * 100)}%`,
+      text:
+        `${domAbbr} are controlling (${domPct}%) but trailing with little time/xG left — the scoreline ` +
+        `model gives them only ${Math.round(domWin * 100)}%. Run-of-play dominance without enough runway; not a win lean.`,
     });
   } else if (domPct >= domT - 3 && leadByScore === domSide) {
     recs.push({
