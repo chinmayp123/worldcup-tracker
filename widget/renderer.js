@@ -13,6 +13,7 @@ let last = null;        // last data payload
 let parlays = null;     // last fetched daily-parlays payload (lazy, on opening the view)
 let record = null;      // last fetched bet record + history (lazy, on opening the view)
 let standings = null;   // last fetched group standings + bracket (lazy, on opening the view)
+let showPast = false;   // picker: whether previous-day matches are expanded (collapsed by default)
 let lastUpdateAt = 0;   // wall-clock of the last data push, for the freshness chip
 
 // highlight whichever control matches the current view/expand state
@@ -184,6 +185,24 @@ function render() {
 
 function liveClass(m) { return m.state === "pre" ? "pre" : m.state === "post" ? "ft" : ""; }
 
+// strip of OTHER games live right now (excludes the one on screen) — for group-stage round 3
+// when two matches kick off simultaneously. Each chip jumps the widget to that game. null if none.
+function liveSwitcher(curId) {
+  const others = (last?.matches || []).filter((mt) => mt.live && mt.id !== curId);
+  if (!others.length) return null;
+  const strip = h("div", { class: "alsolive" });
+  strip.appendChild(h("span", { class: "al-lbl" }, [h("span", { class: "dot" }), document.createTextNode("Also live")]));
+  for (const mt of others) {
+    strip.appendChild(h("div", { class: "al-chip", title: "Switch to this game", onclick: () => choose(mt.id) }, [
+      flagImg(mt.homeAbbr, mt.homeLogo),
+      h("b", { text: `${mt.homeAbbr} ${mt.homeScore}–${mt.awayScore} ${mt.awayAbbr}` }),
+      flagImg(mt.awayAbbr, mt.awayLogo),
+      h("span", { class: "al-min", text: mt.statusText || "LIVE" }),
+    ].filter(Boolean)));
+  }
+  return strip;
+}
+
 function renderMatch(m) {
   titleEl.textContent = `${m.home.abbr} v ${m.away.abbr}`;
   const blocks = [];
@@ -213,6 +232,10 @@ function renderMatch(m) {
     ].filter(Boolean)),
   ]));
   if (expanded && m.venue) blocks.push(h("div", { class: "venue", text: m.venue }));
+
+  // concurrent live games (e.g. group-stage final round kicks off two at once) — one tap to flip
+  const sw = liveSwitcher(m.id);
+  if (sw) blocks.push(sw);
 
   // prediction
   if (m.prediction) {
@@ -625,6 +648,36 @@ function eventIcon(type) {
   return "•";
 }
 
+// one picker row for a match
+function pickRow(mt) {
+  const score = mt.state === "pre" ? "vs" : `${mt.homeScore}–${mt.awayScore}`;
+  const right = mt.live ? mt.statusText : mt.state === "post" ? "FT" : new Date(mt.date).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  const predTxt = mt.pred ? `${mt.pred.ph}–${mt.pred.pa}` : "";
+  const predTitle = mt.pred ? `predicted: ${mt.homeAbbr} ${Math.round(mt.pred.wH * 100)}% / Draw ${Math.round(mt.pred.wD * 100)}% / ${mt.awayAbbr} ${Math.round(mt.pred.wA * 100)}%` : "";
+  // teams stay a uniform colour — the flags carry the team identity (colouring text too is noise)
+  const teamEl = (abbr) => h("span", { class: "pk-team", text: abbr });
+  const left = h("span", { class: "l" }, [
+    flagImg(mt.homeAbbr, mt.homeLogo), teamEl(mt.homeAbbr),
+    h("span", { class: "pk-score", text: score }),
+    teamEl(mt.awayAbbr), flagImg(mt.awayAbbr, mt.awayLogo),
+  ].filter(Boolean));
+  return h("div", { class: `row ${mt.live ? "islive" : ""}`, onclick: () => choose(mt.id) }, [
+    left,
+    h("span", { class: "pred-mini", text: predTxt, title: predTitle }),
+    h("span", { class: `r ${mt.live ? "live" : ""}`, text: right }),
+  ]);
+}
+
+// append day-grouped rows for a list of matches into a container
+function appendDays(container, list) {
+  let curDay = "";
+  for (const mt of list) {
+    const day = new Date(mt.date).toLocaleDateString([], { weekday: "short", month: "short", day: "numeric" });
+    if (day !== curDay) { curDay = day; container.appendChild(h("div", { class: "day", text: day })); }
+    container.appendChild(pickRow(mt));
+  }
+}
+
 function renderPicker(matches) {
   titleEl.textContent = "Pick a match";
   const wrap = h("div", { class: "pick" });
@@ -639,29 +692,17 @@ function renderPicker(matches) {
     h("span", { class: "r", text: "default" }),
   ]));
 
-  let curDay = "";
-  for (const mt of matches) {
-    const day = new Date(mt.date).toLocaleDateString([], { weekday: "short", month: "short", day: "numeric" });
-    if (day !== curDay) { curDay = day; wrap.appendChild(h("div", { class: "day", text: day })); }
-    const score = mt.state === "pre" ? "vs" : `${mt.homeScore}–${mt.awayScore}`;
-    const right = mt.live ? mt.statusText : mt.state === "post" ? "FT" : new Date(mt.date).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
-    const predTxt = mt.pred ? `${mt.pred.ph}–${mt.pred.pa}` : "";
-    const predTitle = mt.pred ? `predicted: ${mt.homeAbbr} ${Math.round(mt.pred.wH * 100)}% / Draw ${Math.round(mt.pred.wD * 100)}% / ${mt.awayAbbr} ${Math.round(mt.pred.wA * 100)}%` : "";
-    // teams stay a uniform colour — the flags carry the team identity (colouring text too is noise)
-    const teamEl = (abbr) => h("span", { class: "pk-team", text: abbr });
-    const left = h("span", { class: "l" }, [
-      flagImg(mt.homeAbbr, mt.homeLogo),
-      teamEl(mt.homeAbbr),
-      h("span", { class: "pk-score", text: score }),
-      teamEl(mt.awayAbbr),
-      flagImg(mt.awayAbbr, mt.awayLogo),
-    ].filter(Boolean));
-    wrap.appendChild(h("div", { class: `row ${mt.live ? "islive" : ""}`, onclick: () => choose(mt.id) }, [
-      left,
-      h("span", { class: "pred-mini", text: predTxt, title: predTitle }),
-      h("span", { class: `r ${mt.live ? "live" : ""}`, text: right }),
-    ]));
+  // previous-day matches collapse behind a toggle (closed by default) so today + upcoming lead
+  const startToday = new Date(); startToday.setHours(0, 0, 0, 0);
+  const past = matches.filter((mt) => new Date(mt.date) < startToday);
+  const rest = matches.filter((mt) => new Date(mt.date) >= startToday);
+
+  if (past.length) {
+    wrap.appendChild(h("div", { class: "pick-toggle", onclick: () => { showPast = !showPast; fadeBody(); render(); } },
+      [h("span", { text: `${showPast ? "▾" : "▸"} Previous results (${past.length})` })]));
+    if (showPast) appendDays(wrap, past);
   }
+  appendDays(wrap, rest);
   return wrap;
 }
 

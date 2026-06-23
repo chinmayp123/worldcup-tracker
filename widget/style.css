@@ -96,6 +96,22 @@ body {
   margin-right: 6px; flex: 0 0 auto; animation: pulse 1.6s ease-in-out infinite;
 }
 @keyframes pulse { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: .35; transform: scale(.7); } }
+/* "Also live" switcher — other games in progress concurrently (group-stage round 3) */
+.alsolive { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 10px; }
+.al-lbl { display: inline-flex; align-items: center; font-size: 9.5px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; color: var(--green); }
+.al-lbl .dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; margin-right: 5px; animation: pulse 1.6s ease-in-out infinite; }
+.al-chip {
+  -webkit-app-region: no-drag;
+  display: inline-flex; align-items: center; gap: 5px; cursor: pointer; white-space: nowrap;
+  background: rgba(70,217,138,.08); border: 1px solid rgba(70,217,138,.25);
+  color: #d7dde6; font-size: 11.5px; padding: 3px 8px; border-radius: 7px;
+  transition: background .12s ease;
+}
+.al-chip:hover { background: rgba(70,217,138,.16); }
+.al-chip .flag { width: 16px; height: 11px; box-shadow: 0 0 0 1px rgba(255,255,255,.18); }
+.al-chip b { font-weight: 700; }
+.al-chip .al-min { color: var(--green); font-weight: 600; }
+
 .score-row { display: flex; align-items: center; justify-content: space-between; gap: 14px; margin-top: 8px; }
 .side { display: flex; align-items: center; gap: 11px; flex: 1 1 0; min-width: 0; }
 .side.home { justify-content: flex-start; }
@@ -178,6 +194,12 @@ td.lead { font-weight: 700; color: #fff; }
 }
 .pick .day:first-child { margin-top: 2px; }
 .pick-hint { font-size: 10px; margin-bottom: 6px; text-align: right; color: var(--muted); }
+.pick-toggle {
+  -webkit-app-region: no-drag;
+  font-size: 10.5px; letter-spacing: .04em; color: var(--muted); cursor: pointer;
+  margin: 10px 0 2px; padding: 4px 8px; border-radius: 6px;
+}
+.pick-toggle:hover { background: rgba(255,255,255,.06); color: var(--txt); }
 
 /* standings + bracket */
 .standtbl { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 2px; }
