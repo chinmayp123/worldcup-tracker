@@ -897,10 +897,11 @@ function espnMarketPrediction(ev) {
 }
 
 // today's matches (today + N days) as lightweight rows for a picker
-export async function listMatchesData({ days = 3 } = {}) {
-  const boards = await Promise.all(
-    Array.from({ length: days }, (_, i) => scoreboardOn(ymd(i)).catch(() => ({ events: [] })))
-  );
+export async function listMatchesData({ back = 2, ahead = 2 } = {}) {
+  // span previous days too (back) so finished games stay viewable, plus today + upcoming (ahead)
+  const offsets = [];
+  for (let i = -back; i <= ahead; i++) offsets.push(i);
+  const boards = await Promise.all(offsets.map((i) => scoreboardOn(ymd(i)).catch(() => ({ events: [] }))));
   const seen = new Set(), events = [];
   for (const b of boards)
     for (const ev of b.events || [])
@@ -1038,8 +1039,12 @@ export async function getRecord() {
 // plus the day's match list for the picker. Never throws — returns { error } instead.
 export async function getWidgetState(query) {
   try {
-    const sb = await scoreboard();
-    const events = sb.events || [];
+    // pull previous days + today + the next 2 (merged, de-duped) so BOTH past (finished) and
+    // future games from the picker resolve — not just today's. Previously this used today-only
+    // scoreboard(), so clicking a past or future game found nothing and showed a blank view.
+    const boards = await Promise.all([-2, -1, 0, 1, 2].map((i) => scoreboardOn(ymd(i)).catch(() => ({ events: [] }))));
+    const seen = new Set(), events = [];
+    for (const b of boards) for (const e of b.events || []) if (!seen.has(e.id)) { seen.add(e.id); events.push(e); }
     let ev = null;
     if (query) {
       ev = findEvent(events, query);
