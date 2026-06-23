@@ -19,8 +19,9 @@ function cfg() {
   catch { return {}; }
 }
 const KEY = process.env.ODDSPAPI_KEY || cfg().oddspapiKey || null;
-// books to try in order for the price (the venue you bet first, then liquid books as backup)
-const BOOKS = (process.env.ODDSPAPI_BOOKS || cfg().oddspapiBooks || "fanduel,bet365,pinnacle").split(",").map((s) => s.trim()).filter(Boolean);
+// books to try in order for the price (the venue you bet first, then a liquid backup). Kept to
+// two to limit how many calls a cache-miss can cost against the 250-req/month free quota.
+const BOOKS = (process.env.ODDSPAPI_BOOKS || cfg().oddspapiBooks || "fanduel,bet365").split(",").map((s) => s.trim()).filter(Boolean);
 
 const get = async (path) => {
   const r = await fetch(`${API}${path}${path.includes("?") ? "&" : "?"}apiKey=${KEY}`, { headers: H });
@@ -30,22 +31,22 @@ const get = async (path) => {
 const arr = (j) => (Array.isArray(j) ? j : (j?.data || []));
 const norm = (s) => (s || "").toLowerCase().replace(/[^a-z]/g, "");
 
-// static market catalogue: marketId -> { marketName, marketType, handicap, outcomes } (cached 6h)
+// static market catalogue: marketId -> { marketName, marketType, handicap, outcomes } (cached 12h)
 let _markets = { at: 0, map: null };
 async function marketsRef() {
   const now = Date.now();
-  if (_markets.map && now - _markets.at < 6 * 3600 * 1000) return _markets.map;
+  if (_markets.map && now - _markets.at < 12 * 3600 * 1000) return _markets.map;
   const map = {};
   for (const m of arr(await get("/markets"))) map[m.marketId] = m;
   _markets = { at: now, map };
   return map;
 }
 
-// WC fixtures with team names/abbrs, keyed by fixtureId (cached 10 min)
+// WC fixtures with team names/abbrs, keyed by fixtureId (cached 2h — fixtures don't change intraday)
 let _fix = { at: 0, map: null };
 async function fixtureNames() {
   const now = Date.now();
-  if (_fix.map && now - _fix.at < 600000) return _fix.map;
+  if (_fix.map && now - _fix.at < 2 * 3600 * 1000) return _fix.map;
   const ymd = (off) => new Date(now + off * 86400000).toISOString().slice(0, 10);
   const map = {};
   for (const f of arr(await get(`/fixtures?sportId=${SOCCER}&tournamentIds=${WC}&from=${ymd(-2)}&to=${ymd(7)}`)))
@@ -54,12 +55,13 @@ async function fixtureNames() {
   return map;
 }
 
-// one bookmaker's odds for every WC fixture (all markets), cached per book (10 min)
+// one bookmaker's odds for every WC fixture (all markets), cached per book (30 min — matches the
+// parlay cache, and pre-match corner/BTTS lines barely move; keeps monthly call count low)
 const _odds = new Map();
 async function tournamentOdds(book) {
   const now = Date.now();
   const hit = _odds.get(book);
-  if (hit && now - hit.at < 600000) return hit.data;
+  if (hit && now - hit.at < 30 * 60 * 1000) return hit.data;
   const data = arr(await get(`/odds-by-tournaments?bookmaker=${book}&tournamentIds=${WC}`));
   _odds.set(book, { at: now, data });
   return data;
