@@ -344,15 +344,28 @@ function renderMatch(m) {
         ...(m.playerProj.home || []).map((p) => ({ ...p, abbr: m.home.abbr })),
         ...(m.playerProj.away || []).map((p) => ({ ...p, abbr: m.away.abbr })),
       ];
-      // predicted scorers — top anytime-score probabilities across both sides
+      // predicted scorers — top anytime-score probabilities across both sides, with FanDuel's
+      // real anytime price next to each (matched by name); ▲ when the model likes it vs the price
+      const fdScorers = m.fdScorers || [];
+      const nrm = (s) => (s || "").toLowerCase().replace(/[^a-z]/g, "");
+      const lastTok = (s) => nrm((s || "").split(/\s+/).filter(Boolean).pop());
+      const fdFor = (name) => fdScorers.find((f) => {
+        const a = nrm(name), b = nrm(f.player); if (!a || !b) return false;
+        return a === b || a.includes(lastTok(f.player)) || b.includes(lastTok(name));
+      });
       const scorers = all.filter((p) => p.scoreProb > 0).sort((a, b) => b.scoreProb - a.scoreProb).slice(0, 6);
       if (scorers.length) {
-        blocks.push(h("div", { class: "label", text: "Predicted scorers · anytime (model est.)" }));
-        blocks.push(h("div", { class: "hint", text: "From each player's recent xG. Display-only — no bettable de-vigged line." }));
-        for (const p of scorers) blocks.push(h("div", { class: "gk" }, [
-          h("span", { text: `${p.abbr} ${p.name}` }),
-          h("span", { class: "est", text: `${Math.round(p.scoreProb * 100)}% · ${p.xgPg.toFixed(2)} xG/g` }),
-        ]));
+        blocks.push(h("div", { class: "label", text: "Predicted scorers · anytime" + (fdScorers.length ? " · FanDuel price" : " (model est.)") }));
+        blocks.push(h("div", { class: "hint", text: "Model % from recent xG vs FanDuel's price (implied %). ▲ = model rates higher than the price. Display-only." }));
+        for (const p of scorers) {
+          const fdp = fdFor(p.name);
+          const value = fdp && fdp.implied != null && p.scoreProb > fdp.implied;
+          const priceTxt = fdp ? ` · FD ${fmtAm(fdp.ml)}${fdp.implied != null ? ` (${Math.round(fdp.implied * 100)}%)` : ""}` : "";
+          blocks.push(h("div", { class: "gk" }, [
+            h("span", { text: `${p.abbr} ${p.name}` }),
+            h("span", { class: value ? "est up" : "est", text: `${Math.round(p.scoreProb * 100)}%${priceTxt}${value ? " ▲" : ""}` }),
+          ]));
+        }
       }
       // projected shots on target — per side, sorted by SOT
       blocks.push(h("div", { class: "label", text: "Projected shots on target · per player (model est.)" }));

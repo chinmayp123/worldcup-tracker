@@ -1164,18 +1164,18 @@ export async function getWidgetState(query) {
         if ((hp && hp.length) || (ap && ap.length)) view.playerProj = { home: hp || [], away: ap || [] };
       } catch { /* best-effort */ }
     }
+    // FanDuel's own public player props (computed once): used both for the props section fallback
+    // and to show FanDuel's anytime-scorer price next to the model's predicted-scorer %.
+    let fd = null;
+    try { fd = await fanduelProps(homeRef, awayRef); } catch { fd = null; }
     // player props: prefer The Odds API (multi-book, de-vigged consensus). When it's
-    // unavailable (no key / quota / 401), fall back to FanDuel's own public prices so the
-    // section still populates — single-book, so no cross-market edge, display only.
+    // unavailable (no key / quota / 401), fall back to FanDuel's own public prices.
     let props = null;
     if (liveOdds?.ev?.id) { try { props = await fetchPlayerProps(liveOdds.ev.id); } catch { props = null; } }
-    if (!props || (!props.scorers?.length && !props.sot?.length)) {
-      try {
-        const fd = await fanduelProps(homeRef, awayRef);
-        if (fd && (fd.scorers.length || fd.sot.length)) props = mapFanduelProps(fd);
-      } catch { /* keep whatever we had */ }
-    }
+    if ((!props || (!props.scorers?.length && !props.sot?.length)) && fd && (fd.scorers.length || fd.sot.length)) props = mapFanduelProps(fd);
     view.playerProps = props;
+    // FanDuel anytime-goalscorer prices [{ player, ml, implied }] for the predicted-scorer compare
+    if (fd && fd.scorers?.length) view.fdScorers = fd.scorers;
     return { match: view, matches };
   } catch (e) {
     return { error: String(e?.message || e), matches: [] };
