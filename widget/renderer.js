@@ -813,6 +813,8 @@ function historyCard(p) {
       h("span", { class: "p-leg-txt", text: `${l.game} · ${l.market}: ${l.pick}` }),
       h("span", { class: "p-leg-meta", text: l.finalScore || fmtAm(l.ml) }),
     ]));
+    // the original reasoning the leg was picked on (older logged legs may not have it)
+    if (l.why) card.appendChild(h("div", { class: "p-why", text: l.why }));
   }
   card.appendChild(h("div", { class: "p-foot" }, [
     h("span", { text: `$${p.stake} → $${p.payout.toFixed(2)}` }),
