@@ -9,10 +9,10 @@
 // edges — Kelly will often say "skip". Same-game parlay odds here MULTIPLY leg prices as an
 // estimate; FanDuel's actual SGP price is correlation-adjusted and will be shorter.
 
-import { scoreboardOn, ymd, summary, scorePrediction, pregameProjections, matchConditions, poissonCdf, fetchOddsEvents, matchOdds, fetchPlayerProps } from "./lib.mjs";
-import { fotmobXG } from "./fotmob.mjs";
+import { scoreboardOn, ymd, summary, scorePrediction, pregameProjections, matchConditions, poissonCdf } from "./lib.mjs";
+import { fotmobXG, fotmobPlayerSOT } from "./fotmob.mjs";
 import { actionPublicBetting } from "./actionnetwork.mjs";
-import { fanduelCorners, fanduelBTTS } from "./fanduel.mjs";
+import { fanduelCorners, fanduelBTTS, fanduelProps } from "./fanduel.mjs";
 
 const amToDec = (ml) => (ml == null ? null : ml > 0 ? ml / 100 + 1 : 100 / -ml + 1);
 const decToAm = (d) => (d >= 2 ? Math.round((d - 1) * 100) : Math.round(-100 / (d - 1)));
@@ -86,16 +86,26 @@ async function matchLegs(ev) {
     pushLeg("Total", `Under ${L}`, 1 - pOver, fd.total.under, "Total", totalFav === "Under");
   }
 
-  // real FanDuel player props (anytime scorer, shots on target) priced off the de-vigged
-  // cross-book consensus. No score-script to contradict, so coherent by default.
+  // anytime-scorer legs: our opponent-adjusted xG model vs FanDuel's REAL anytime price — a
+  // genuine model-vs-market edge, same approach as corners/BTTS. All matched scorers share the
+  // "Scorer" group, so pickMix takes only the single best-edge scorer (no stacking longshots).
   try {
-    const oe = matchOdds(await fetchOddsEvents(), homeRef.name, awayRef.name);
-    const props = oe?.ev?.id ? await fetchPlayerProps(oe.ev.id) : null;
-    if (props) {
-      for (const s of props.scorers) pushLeg("Scorer", `${s.player} anytime`, s.prob, s.price.primaryRaw, "Prop", true);
-      for (const s of props.sot) pushLeg("SOT", `${s.player} O${s.line}`, s.fairOver, s.price.primaryRaw, "Prop", true);
+    const fdProps = await fanduelProps(homeRef, awayRef);
+    if (fdProps?.scorers?.length) {
+      const [hp, ap] = await Promise.all([fotmobPlayerSOT(homeRef, awayRef), fotmobPlayerSOT(awayRef, homeRef)]);
+      const model = [...(hp || []), ...(ap || [])];
+      const nrm = (s) => (s || "").toLowerCase().replace(/[^a-z]/g, "");
+      const lastTok = (s) => nrm((s || "").split(/\s+/).filter(Boolean).pop());
+      const modelFor = (name) => model.find((p) => {
+        const a = nrm(name), b = nrm(p.name); if (!a || !b) return false;
+        return a === b || a.includes(lastTok(p.name)) || b.includes(lastTok(name));
+      });
+      for (const s of fdProps.scorers) {
+        const mp = modelFor(s.player);
+        if (mp && s.ml != null) pushLeg("Scorer", `${s.player} anytime`, mp.scoreProb, s.ml, "Scorer", true);
+      }
     }
-  } catch { /* no props (free tier / not posted yet) — parlay falls back to ML + totals */ }
+  } catch { /* no scorer market / no model — parlay falls back to its other legs */ }
 
   // real FanDuel total-corners line vs our INDEPENDENT corner projection (R1 form -> Poisson)
   try {
@@ -156,7 +166,7 @@ function legReason(l) {
     : l.group === "Total" ? (/under/i.test(l.pick) ? "model projects a low-scoring game" : "model projects an open, high-scoring game")
     : l.group === "Corners" ? (/under/i.test(l.pick) ? "model projects few corners" : "model projects plenty of corners")
     : l.group === "BTTS" ? (/yes/i.test(l.pick) ? "model expects both teams to score" : "model expects at least one clean sheet")
-    : l.group === "Prop" ? "FanDuel price longer than the cross-book consensus"
+    : l.group === "Scorer" ? "model rates this scorer above the price (opponent-adjusted xG)"
     : "positive-edge spot";
   return `${tag} — model ${mp}% vs market ${im}% (${e >= 0 ? "+" : ""}${e}% edge)`;
 }
