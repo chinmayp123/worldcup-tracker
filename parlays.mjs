@@ -13,6 +13,7 @@ import { scoreboardOn, ymd, summary, scorePrediction, pregameProjections, matchC
 import { fotmobXG, fotmobPlayerSOT } from "./fotmob.mjs";
 import { actionPublicBetting } from "./actionnetwork.mjs";
 import { fanduelCorners, fanduelBTTS, fanduelProps } from "./fanduel.mjs";
+import { oddspapiCorners, oddspapiBTTS } from "./oddspapi.mjs";
 
 const amToDec = (ml) => (ml == null ? null : ml > 0 ? ml / 100 + 1 : 100 / -ml + 1);
 const decToAm = (d) => (d >= 2 ? Math.round((d - 1) * 100) : Math.round(-100 / (d - 1)));
@@ -107,9 +108,10 @@ async function matchLegs(ev) {
     }
   } catch { /* no scorer market / no model — parlay falls back to its other legs */ }
 
-  // real FanDuel total-corners line vs our INDEPENDENT corner projection (R1 form -> Poisson)
+  // real total-corners line (OddsPapi multi-book, FanDuel public API as fallback) vs our
+  // INDEPENDENT corner projection (recent form -> Poisson) — model-vs-market edge
   try {
-    const fdc = await fanduelCorners(homeRef, awayRef);
+    const fdc = (await oddspapiCorners(homeRef, awayRef)) || (await fanduelCorners(homeRef, awayRef));
     if (fdc && fdc.line != null && priors?.corners?.total != null) {
       const pOver = 1 - poissonCdf(Math.floor(fdc.line), priors.corners.total);
       pushLeg("Corners", `Over ${fdc.line}`, pOver, fdc.over, "Corners", pOver >= 0.5);
@@ -117,9 +119,10 @@ async function matchLegs(ev) {
     }
   } catch { /* no corner market posted — fine */ }
 
-  // real FanDuel both-teams-to-score vs the model's INDEPENDENT pBTTS (P(home scores) x P(away))
+  // real both-teams-to-score price (OddsPapi multi-book, FanDuel fallback) vs the model's
+  // INDEPENDENT pBTTS (P(home scores) x P(away scores))
   try {
-    const btts = await fanduelBTTS(homeRef, awayRef);
+    const btts = (await oddspapiBTTS(homeRef, awayRef)) || (await fanduelBTTS(homeRef, awayRef));
     if (btts && btts.yes != null && pred.pBTTS != null) {
       pushLeg("BTTS", "Yes", pred.pBTTS, btts.yes, "BTTS", bttsFav === "Yes");
       if (btts.no != null) pushLeg("BTTS", "No", 1 - pred.pBTTS, btts.no, "BTTS", bttsFav === "No");
