@@ -103,10 +103,9 @@ export async function settle() {
   return data;
 }
 
-// calibration + performance across everything settled
-export function stats() {
-  const data = read();
-  const legs = (data.days || []).flatMap((d) => d.parlays).flatMap((p) => p.legs).filter((l) => l.result === "hit" || l.result === "miss");
+// calibration + performance over a given list of logged days
+function computeStats(days) {
+  const legs = days.flatMap((d) => d.parlays).flatMap((p) => p.legs).filter((l) => l.result === "hit" || l.result === "miss");
   const buckets = Array.from({ length: 10 }, () => ({ n: 0, hit: 0, psum: 0 }));
   let brier = 0, hits = 0;
   for (const l of legs) {
@@ -116,7 +115,7 @@ export function stats() {
     const b = Math.min(9, Math.max(0, Math.floor(l.modelProb * 10)));
     buckets[b].n++; buckets[b].hit += o; buckets[b].psum += l.modelProb;
   }
-  const settled = (data.days || []).flatMap((d) => d.parlays).filter((p) => p.settled);
+  const settled = days.flatMap((d) => d.parlays).filter((p) => p.settled);
   let staked = 0, returned = 0, wins = 0;
   for (const p of settled) { staked += p.stake; if (p.result === "win") { returned += p.payout; wins++; } }
   return {
@@ -127,6 +126,16 @@ export function stats() {
     parlays: settled.length, parlayWins: wins, staked, returned, profit: returned - staked,
     roi: staked ? (returned - staked) / staked : null,
   };
+}
+
+// all-time calibration + performance across everything settled
+export function stats() { return computeStats(read().days || []); }
+
+// rolling window: stats over just the most recent `nDays` logged days, so a single old lucky
+// hit stops skewing the picture as more data comes in. Includes the date range it covers.
+export function statsRecent(nDays = 7) {
+  const days = (read().days || []).slice().sort((a, b) => b.date.localeCompare(a.date)).slice(0, nDays);
+  return { ...computeStats(days), windowDays: days.length, from: days[days.length - 1]?.date || null, to: days[0]?.date || null };
 }
 
 export function readLog() { return read(); }

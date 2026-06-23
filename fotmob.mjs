@@ -180,6 +180,46 @@ export async function fotmobTeamRates(team, lookback = 3) {
   }
 }
 
+// Per-player shots-on-target projection from a team's recent shotmaps (default last 3 games).
+// For each recent match we read the shotmap, keep this team's players, and average their SOT per
+// game. Returns the top projected players [{ name, projSOT, shotsPg, xgPg, games }] or null.
+// DISPLAY-ONLY: there's no free way to de-vig player props into a fair line, so this informs the
+// eye, it doesn't become a bet. team is { name, abbr }.
+export async function fotmobPlayerSOT(team, lookback = 3) {
+  try {
+    const fixtures = await fetchFotmobFixtures();
+    const played = fixtures
+      .filter((f) => f.finished && (sideMatch(f.home.name, team) || sideMatch(f.away.name, team)))
+      .sort((a, b) => String(b.utcTime || "").localeCompare(String(a.utcTime || "")))
+      .slice(0, lookback);
+    if (!played.length) return null;
+    const agg = new Map(); // name -> { name, sot, shots, xg }
+    let mp = 0; // matches with usable shotmap data
+    for (const f of played) {
+      const m = await fetchFotmobMatch(f.pageUrl);
+      if (!m || !(m.shots || []).length) continue;
+      mp += 1;
+      const side = sideMatch(m.homeTeam.name, team) ? "home" : "away";
+      const sm = aggregateShotmap(m.shots, m.homeTeam.id, m.awayTeam.id);
+      for (const p of sm.players) {
+        if (p.side !== side) continue;
+        const rec = agg.get(p.name) || { name: p.name, sot: 0, shots: 0, xg: 0 };
+        rec.sot += p.sot; rec.shots += p.shots; rec.xg += p.xg;
+        agg.set(p.name, rec);
+      }
+    }
+    if (!mp) return null;
+    const players = [...agg.values()]
+      .map((r) => ({ name: r.name, projSOT: r.sot / mp, shotsPg: r.shots / mp, xgPg: r.xg / mp, games: mp }))
+      .filter((p) => p.projSOT > 0)
+      .sort((a, b) => b.projSOT - a.projSOT)
+      .slice(0, 5);
+    return players.length ? players : null;
+  } catch {
+    return null;
+  }
+}
+
 // High-level resolver: real xG + match data for an ESPN match, oriented to ESPN home/away.
 // home / away are { name, abbr }. Returns a rich object or null. Never throws.
 export async function fotmobXG(home, away, dateISO) {

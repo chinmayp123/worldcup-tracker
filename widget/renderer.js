@@ -270,6 +270,16 @@ function renderMatch(m) {
       sv(m.home.abbr, pg.saves.home);
       sv(m.away.abbr, pg.saves.away);
     }
+    if (m.sotProjections && ((m.sotProjections.home || []).length || (m.sotProjections.away || []).length)) {
+      blocks.push(h("div", { class: "label", text: "Projected shots on target · per player (model est.)" }));
+      blocks.push(h("div", { class: "hint", text: "From each player's recent shotmaps. Display-only — no bettable de-vigged line." }));
+      const rows = (arr, abbr) => (arr || []).forEach((p) => blocks.push(h("div", { class: "gk" }, [
+        h("span", { text: `${abbr} ${p.name}` }),
+        h("span", { class: "est", text: `proj ${p.projSOT.toFixed(1)} SOT · ${p.xgPg.toFixed(2)} xG/g (${p.games}g)` }),
+      ])));
+      rows(m.sotProjections.home, m.home.abbr);
+      rows(m.sotProjections.away, m.away.abbr);
+    }
     if (m.conditions) {
       const cd = m.conditions;
       blocks.push(h("div", { class: "label", text: "Conditions · venue & rest (WC2026)" }));
@@ -713,6 +723,7 @@ function renderRecord(data) {
     h("div", { class: "rec-val " + (cls || ""), text: val }),
     h("div", { class: "rec-lbl", text: label }),
   ]);
+  wrap.appendChild(h("div", { class: "label", text: "All-time" }));
   wrap.appendChild(h("div", { class: "rec-grid" }, [
     stat("Leg hit rate", s.legs ? `${pct(s.legHitRate)}` : "—"),
     stat("Legs settled", String(s.legs || 0)),
@@ -723,6 +734,18 @@ function renderRecord(data) {
   ]));
   if (!s.legs) wrap.appendChild(h("div", { class: "hint", text: "Stats fill in as games finish and settle each morning. Brier = calibration (lower is better)." }));
 
+  // rolling recent window — the trend, undistorted by old lucky/unlucky days
+  const rc = data.recent;
+  if (rc && rc.legs) {
+    const range = rc.from && rc.to && rc.from !== rc.to ? ` (${rc.from} → ${rc.to})` : rc.to ? ` (${rc.to})` : "";
+    wrap.appendChild(h("div", { class: "label", text: `Recent · last ${rc.windowDays} day${rc.windowDays > 1 ? "s" : ""}${range}` }));
+    wrap.appendChild(h("div", { class: "rec-grid" }, [
+      stat("Hit rate", `${pct(rc.legHitRate)} (${rc.legs})`),
+      stat("Brier", rc.brier == null ? "—" : rc.brier.toFixed(3)),
+      stat("Profit", money(rc.profit), (rc.profit ?? 0) >= 0 ? "up" : "neg"),
+    ]));
+  }
+
   // calibration
   if (s.calibration && s.calibration.length) {
     wrap.appendChild(h("div", { class: "label", text: "Calibration · model % vs actual" }));
@@ -730,6 +753,18 @@ function renderRecord(data) {
       h("span", { text: b.bucket }),
       h("span", { class: "est", text: `pred ${pct(b.predicted)} → hit ${pct(b.actual)} (n=${b.n})` }),
     ]));
+  }
+
+  // shots/corner projection accuracy (model est. vs actual final stats)
+  const pa = data.projAccuracy;
+  if (pa && (pa.corners || pa.shots)) {
+    wrap.appendChild(h("div", { class: "label", text: "Projection accuracy · model vs actual" }));
+    const accRow = (name, a) => { if (a) wrap.appendChild(h("div", { class: "gk" }, [
+      h("span", { text: `${name} (n=${a.n})` }),
+      h("span", { class: "est", text: `avg proj ${a.projAvg.toFixed(1)} → actual ${a.actualAvg.toFixed(1)} · off by ${a.mae.toFixed(1)}` }),
+    ])); };
+    accRow("Corners total", pa.corners);
+    accRow("Total shots", pa.shots);
   }
 
   // history of recommended parlays, newest day first

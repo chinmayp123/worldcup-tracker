@@ -6,7 +6,7 @@
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { fotmobXG, fotmobTeamRates, fetchFotmobFixtures } from "./fotmob.mjs";
+import { fotmobXG, fotmobTeamRates, fetchFotmobFixtures, fotmobPlayerSOT } from "./fotmob.mjs";
 import { actionPublicBetting } from "./actionnetwork.mjs";
 import { fanduelProps } from "./fanduel.mjs";
 
@@ -974,6 +974,45 @@ function savePregame(id, proj) {
 }
 function loadPregame(id) { const e = loadPregameStore()[id]; return e ? e.proj : null; }
 
+// grade saved pregame projections against the actual final box score (corners total + total
+// shots), persisting actuals so finished games aren't refetched. Returns accuracy aggregates:
+// { corners: { n, mae, projAvg, actualAvg }, shots: {...} } — answers "are these any good?"
+export async function getProjectionAccuracy() {
+  const store = loadPregameStore();
+  const num = (v) => parseInt(v || 0, 10) || 0;
+  let changed = false;
+  for (const id of Object.keys(store)) {
+    const e = store[id];
+    if (e.graded || !e.proj) continue;
+    try {
+      const sum = await summary(id);
+      if (!sum.header?.competitions?.[0]?.status?.type?.completed) continue;
+      const teams = sum.boxscore?.teams || [];
+      const hm = statMap(teams[0] || {}), am = statMap(teams[1] || {});
+      const corners = num(hm.wonCorners) + num(am.wonCorners);
+      const shots = num(hm.totalShots) + num(am.totalShots);
+      e.actual = { cornersTotal: corners || null, shotsTotal: shots || null };
+      e.graded = true; changed = true;
+    } catch { /* not final / fetch failed */ }
+  }
+  if (changed) { try { writeFileSync(PREGAME_FILE, JSON.stringify(store)); } catch { /* ignore */ } }
+  const cP = [], cA = [], sP = [], sA = [];
+  for (const id of Object.keys(store)) {
+    const e = store[id];
+    if (!e.graded || !e.actual || !e.proj) continue;
+    if (e.actual.cornersTotal != null && e.proj.corners?.total != null) { cP.push(e.proj.corners.total); cA.push(e.actual.cornersTotal); }
+    const sProj = (e.proj.shots?.home?.shots || 0) + (e.proj.shots?.away?.shots || 0);
+    if (e.actual.shotsTotal != null && sProj) { sP.push(sProj); sA.push(e.actual.shotsTotal); }
+  }
+  const agg = (P, A) => P.length ? {
+    n: P.length,
+    mae: P.reduce((s, p, i) => s + Math.abs(p - A[i]), 0) / P.length,
+    projAvg: P.reduce((s, p) => s + p, 0) / P.length,
+    actualAvg: A.reduce((s, a) => s + a, 0) / A.length,
+  } : null;
+  return { corners: agg(cP, cA), shots: agg(sP, sA) };
+}
+
 // the bet record for the widget: settles finished games, then returns calibration/performance
 // stats plus the logged parlay history (newest day first). Cached briefly (settle hits network).
 // betlog.mjs imports from this module, so import it lazily to avoid a load-time cycle.
@@ -986,7 +1025,8 @@ export async function getRecord() {
     const bl = await import("./betlog.mjs");
     await bl.settle().catch(() => {});
     const log = bl.readLog();
-    const data = { stats: bl.stats(), days: (log.days || []).slice().reverse() }; // newest first
+    const projAccuracy = await getProjectionAccuracy().catch(() => null);
+    const data = { stats: bl.stats(), recent: bl.statsRecent(7), projAccuracy, days: (log.days || []).slice().reverse() }; // newest first
     recordCache = { at: now, data };
     return data;
   } catch (e) {
@@ -1052,6 +1092,13 @@ export async function getWidgetState(query) {
       if (saved) pregame = { ...saved, basis: `${saved.basis || "pre"} · saved pre-kickoff` };
     }
     const view = buildMatchView(ev, sum, liveOdds, realXG, publicBetting, pregame, conditions);
+    // pre-match per-player shots-on-target projections (model est., display-only) from recent form
+    if (isPre) {
+      try {
+        const [hsot, asot] = await Promise.all([fotmobPlayerSOT(homeRef), fotmobPlayerSOT(awayRef)]);
+        if ((hsot && hsot.length) || (asot && asot.length)) view.sotProjections = { home: hsot || [], away: asot || [] };
+      } catch { /* best-effort */ }
+    }
     // player props: prefer The Odds API (multi-book, de-vigged consensus). When it's
     // unavailable (no key / quota / 401), fall back to FanDuel's own public prices so the
     // section still populates — single-book, so no cross-market edge, display only.
