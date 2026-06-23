@@ -171,6 +171,16 @@ ipcMain.handle("toggle-pin", () => {
   if (win) win.setAlwaysOnTop(pinned, "screen-saver");
   return pinned;
 });
+// generate (or return cached) daily parlays for the Parlays view; never throws to the renderer
+ipcMain.handle("get-parlays", async () => {
+  try { return await lib.getDailyParlays(10); }
+  catch (e) { return { error: String(e?.message || e) }; }
+});
+// bet record + parlay history for the Record view; never throws to the renderer
+ipcMain.handle("get-record", async () => {
+  try { return await lib.getRecord(); }
+  catch (e) { return { error: String(e?.message || e) }; }
+});
 ipcMain.handle("refresh", () => poll());
 ipcMain.handle("hide", () => win?.hide()); // no longer wired to a button; tray menu uses win.hide() directly
 ipcMain.handle("quit", () => app.quit());

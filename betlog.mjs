@@ -5,7 +5,7 @@
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { summary } from "./lib.mjs";
+import { summary, statMap } from "./lib.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const LOG_DIR = join(HERE, "bets");
@@ -33,7 +33,8 @@ export function recordDay(out) {
   return data;
 }
 
-// grade a single leg against a final score { hs, as, hAbbr, aAbbr }
+// grade a single leg against a final result { hs, as, hAbbr, aAbbr, corners }.
+// Returns true (hit) / false (miss) / null (can't grade — e.g. player props, or corner data missing)
 function gradeLeg(leg, f) {
   if (leg.market === "Moneyline") {
     const winner = f.hs > f.as ? f.hAbbr : f.as > f.hs ? f.aAbbr : "Draw";
@@ -44,7 +45,16 @@ function gradeLeg(leg, f) {
     const total = f.hs + f.as;
     return /over/i.test(leg.pick) ? total > L : total < L;
   }
-  return null;
+  if (leg.market === "BTTS") {
+    const both = f.hs >= 1 && f.as >= 1;
+    return /yes/i.test(leg.pick) ? both : !both;
+  }
+  if (leg.market === "Corners") {
+    if (f.corners == null) return null; // corner stats not available
+    const L = parseFloat(leg.pick.replace(/[^0-9.]/g, ""));
+    return /over/i.test(leg.pick) ? f.corners > L : f.corners < L;
+  }
+  return null; // Scorer / SOT player props can't be graded from the team score
 }
 
 // settle every unsettled parlay whose games are final; grades each leg + the parlay
@@ -60,7 +70,15 @@ export async function settle() {
       if (comp?.status?.type?.completed) {
         const h = comp.competitors.find((c) => c.homeAway === "home");
         const a = comp.competitors.find((c) => c.homeAway === "away");
-        res = { hs: Number(h.score), as: Number(a.score), hAbbr: h.team.abbreviation, aAbbr: a.team.abbreviation };
+        // total corners from the box score (best-effort) so Corners legs can settle
+        let corners = null;
+        try {
+          const teams = sum.boxscore?.teams || [];
+          const hc = parseInt(statMap(teams.find((t) => t.team.id === h.team.id) || teams[0] || {}).wonCorners || 0, 10) || 0;
+          const ac = parseInt(statMap(teams.find((t) => t.team.id === a.team.id) || teams[1] || {}).wonCorners || 0, 10) || 0;
+          if (hc || ac) corners = hc + ac;
+        } catch { /* no corner stats */ }
+        res = { hs: Number(h.score), as: Number(a.score), hAbbr: h.team.abbreviation, aAbbr: a.team.abbreviation, corners };
       }
     } catch { /* not final / fetch failed */ }
     cache.set(id, res);

@@ -3,11 +3,12 @@
 // fetching, odds, predictions, keeper-saves model, and betting reads live in ONE place.
 // Everything here returns plain data — no terminal ANSI, no DOM — so any front end can use it.
 
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { fotmobXG, fotmobTeamRates, fetchFotmobFixtures } from "./fotmob.mjs";
 import { actionPublicBetting } from "./actionnetwork.mjs";
+import { fanduelProps } from "./fanduel.mjs";
 
 export const BASE = "https://site.api.espn.com/apis/site/v2/sports/soccer/fifa.world";
 const SPORT_BASE = "https://api.the-odds-api.com/v4/sports/soccer_fifa_world_cup";
@@ -437,7 +438,11 @@ export function scorePrediction(ev, sum, liveOdds, realXG = null, priors = null,
   const pBTTS = pHomeScore * pAwayScore;
   const needOver = Math.max(0, 3 - scored);
   const pOver25 = needOver === 0 ? 1 : 1 - poissonCdf(needOver - 1, remLamH + remLamA);
-  return { basis, early, ph: Math.round(expH), pa: Math.round(expA), expH, expA, wH, wD, wA, pBTTS, pOver25, remLamH, remLamA };
+  // displayed scoreline = the MOST LIKELY exact score (the mode of each side's goal distribution,
+  // = floor of expected goals), NOT each side rounded independently. Rounding both up inflated the
+  // shown total above the expected total, so "predicted 2-1" could sit next to an Under 2.5 pick.
+  // The mode keeps the scoreline consistent with the win % and totals (e.g. 1.66/0.84 -> 1-0).
+  return { basis, early, ph: Math.floor(expH), pa: Math.floor(expA), expH, expA, wH, wD, wA, pBTTS, pOver25, remLamH, remLamA };
 }
 
 // betting model: run-of-play dominance vs market price → considerations (bet + reasoning).
@@ -606,6 +611,10 @@ export async function pregameProjections(home, away) {
   const [hr, ar] = await Promise.all([fotmobTeamRates(home), fotmobTeamRates(away)]);
   if (!hr || !ar) return null;
   const mean = (a, b) => (a + b) / 2;
+  // attack = blend of xG created and goals actually scored; defence = xG + goals conceded.
+  // goals capture finishing/overperformance (a 7-1 lifts attack); falls back to xG if no goals.
+  const att = (r) => mean(r.xgFor, r.goalsFor ?? r.xgFor);
+  const def = (r) => mean(r.xgAgainst, r.goalsAgainst ?? r.xgAgainst);
   // only one game has been played, so regularize each rate toward a tournament prior
   // (50/50) — keeps a single 0-corner game from producing a nonsensical projection
   const shrink = (v, prior) => (v + prior) / 2;
@@ -629,14 +638,17 @@ export async function pregameProjections(home, away) {
   const sotA = mean(shrink(ar.sotFor, 4), shrink(hr.sotAgainst, 4));
   const pOverSH = 1 - poissonCdf(Math.floor(sLine), savesH), pOverSA = 1 - poissonCdf(Math.floor(sLine), savesA);
   return {
-    basis: "R1 form",
+    basis: `recent form (${Math.max(hr.games, ar.games)}g)`,
     shots: { home: { shots: shotsH, sot: sotH }, away: { shots: shotsA, sot: sotA } },
     corners: { home: cH, away: cA, total: cTotal, line: cLine, pOver: pOverC, odds: probToAmerican(pOverC) },
     saves: {
       home: { proj: savesH, line: sLine, pOver: pOverSH, odds: probToAmerican(pOverSH) },
       away: { proj: savesA, line: sLine, pOver: pOverSA, odds: probToAmerican(pOverSA) },
     },
-    xgPrior: { home: mean(hr.xgFor, ar.xgAgainst), away: mean(ar.xgFor, hr.xgAgainst) },
+    // attack/defence strength blends xG with REAL goals scored/conceded, so a team that has
+    // actually been banging them in (or leaking) moves the scoreline prior — not just chance
+    // quality. Each side's prior = its attack vs the opponent's defence.
+    xgPrior: { home: mean(att(hr), def(ar)), away: mean(att(ar), def(hr)) },
   };
 }
 
@@ -923,6 +935,65 @@ export async function listMatchesData({ days = 3 } = {}) {
   });
 }
 
+// the day's $10 parlays for the widget's Parlays view. Generation is expensive (per-game
+// model + odds + public-betting fetches), so cache it and rebuild at most every PARLAY_TTL.
+// parlays.mjs imports from this module, so import it lazily to avoid a load-time cycle.
+let parlayCache = { at: 0, data: null };
+const PARLAY_TTL = 30 * 60 * 1000; // 30 min
+export async function getDailyParlays(stake = 10) {
+  const now = Date.now();
+  if (parlayCache.data && now - parlayCache.at < PARLAY_TTL) return parlayCache.data;
+  const { generateDailyParlays } = await import("./parlays.mjs");
+  const data = await generateDailyParlays(stake);
+  parlayCache = { at: now, data };
+  return data;
+}
+
+// shape FanDuel's single-book props into the same structure the Odds-API path returns, so the
+// renderer draws them unchanged. No other book, so best = null (nothing "beats FanDuel").
+function mapFanduelProps(fd) {
+  const price = (ml, implied) => ({ primary: fmtAmerican(ml), primaryRaw: ml, best: null, bestBook: null, bestRaw: null, beats: false, implied: implied ?? ml2prob(ml) });
+  return {
+    scorers: fd.scorers.map((s) => ({ player: s.player, prob: null, twoSided: false, price: price(s.ml, s.implied) })),
+    sot: fd.sot.map((s) => ({ player: s.player, line: s.line, fairOver: s.fairOver, price: price(s.over) })),
+    source: "fanduel",
+  };
+}
+
+// pregame projections are only computed before kickoff; snapshot them to disk so we can show
+// them again (to compare against the live/final stats) once the game has started. Keyed by event.
+const PREGAME_FILE = join(dirname(fileURLToPath(import.meta.url)), "bets", "pregame.json");
+function loadPregameStore() { try { return JSON.parse(readFileSync(PREGAME_FILE, "utf8")); } catch { return {}; } }
+function savePregame(id, proj) {
+  try {
+    const store = loadPregameStore();
+    store[id] = { savedAt: Date.now(), proj };
+    if (!existsSync(dirname(PREGAME_FILE))) mkdirSync(dirname(PREGAME_FILE), { recursive: true });
+    writeFileSync(PREGAME_FILE, JSON.stringify(store));
+  } catch { /* best-effort */ }
+}
+function loadPregame(id) { const e = loadPregameStore()[id]; return e ? e.proj : null; }
+
+// the bet record for the widget: settles finished games, then returns calibration/performance
+// stats plus the logged parlay history (newest day first). Cached briefly (settle hits network).
+// betlog.mjs imports from this module, so import it lazily to avoid a load-time cycle.
+let recordCache = { at: 0, data: null };
+const RECORD_TTL = 5 * 60 * 1000; // 5 min
+export async function getRecord() {
+  const now = Date.now();
+  if (recordCache.data && now - recordCache.at < RECORD_TTL) return recordCache.data;
+  try {
+    const bl = await import("./betlog.mjs");
+    await bl.settle().catch(() => {});
+    const log = bl.readLog();
+    const data = { stats: bl.stats(), days: (log.days || []).slice().reverse() }; // newest first
+    recordCache = { at: now, data };
+    return data;
+  } catch (e) {
+    return { error: String(e?.message || e), stats: null, days: [] };
+  }
+}
+
 // high-level state for the widget: a single match view (by query, or the lone live game),
 // plus the day's match list for the picker. Never throws — returns { error } instead.
 export async function getWidgetState(query) {
@@ -971,12 +1042,28 @@ export async function getWidgetState(query) {
       isPre ? pregameProjections(homeRef, awayRef) : Promise.resolve(null),
       matchConditions(ev, homeRef, awayRef),
     ]);
-    const view = buildMatchView(ev, sum, liveOdds, realXG, publicBetting, priors, conditions);
-    // attach real de-vigged player props for the displayed match (best-effort)
-    if (liveOdds?.ev?.id) {
-      try { view.playerProps = await fetchPlayerProps(liveOdds.ev.id); }
-      catch { view.playerProps = null; }
+    // persist the pregame projection while still pre; once live/finished, re-attach the saved
+    // snapshot so the section stays visible to compare against the actual stats. (scorePrediction
+    // only blends priors when state==="pre", so a restored snapshot never alters the live model.)
+    let pregame = priors;
+    if (isPre && priors) savePregame(ev.id, priors);
+    else if (!isPre) {
+      const saved = loadPregame(ev.id);
+      if (saved) pregame = { ...saved, basis: `${saved.basis || "pre"} · saved pre-kickoff` };
     }
+    const view = buildMatchView(ev, sum, liveOdds, realXG, publicBetting, pregame, conditions);
+    // player props: prefer The Odds API (multi-book, de-vigged consensus). When it's
+    // unavailable (no key / quota / 401), fall back to FanDuel's own public prices so the
+    // section still populates — single-book, so no cross-market edge, display only.
+    let props = null;
+    if (liveOdds?.ev?.id) { try { props = await fetchPlayerProps(liveOdds.ev.id); } catch { props = null; } }
+    if (!props || (!props.scorers?.length && !props.sot?.length)) {
+      try {
+        const fd = await fanduelProps(homeRef, awayRef);
+        if (fd && (fd.scorers.length || fd.sot.length)) props = mapFanduelProps(fd);
+      } catch { /* keep whatever we had */ }
+    }
+    view.playerProps = props;
     return { match: view, matches };
   } catch (e) {
     return { error: String(e?.message || e), matches: [] };

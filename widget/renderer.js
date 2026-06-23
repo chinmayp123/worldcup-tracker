@@ -7,8 +7,10 @@ const titleEl = document.getElementById("title");
 
 let expanded = false;
 let pinned = true;
-let viewMode = "match"; // "match" | "pick"
+let viewMode = "match"; // "match" | "pick" | "parlay" | "record"
 let last = null;        // last data payload
+let parlays = null;     // last fetched daily-parlays payload (lazy, on opening the view)
+let record = null;      // last fetched bet record + history (lazy, on opening the view)
 
 // tiny DOM helper
 function h(tag, opts = {}, kids = []) {
@@ -77,6 +79,22 @@ document.getElementById("btn-pick").addEventListener("click", () => {
   viewMode = viewMode === "pick" ? "match" : "pick";
   render();
 });
+document.getElementById("btn-parlays").addEventListener("click", async () => {
+  if (viewMode === "parlay") { viewMode = "match"; render(); return; }
+  viewMode = "parlay";
+  render(); // shows a "building…" placeholder while we fetch
+  const data = await window.wc.getParlays();
+  parlays = data;
+  if (viewMode === "parlay") render(); // only redraw if the user is still on this view
+});
+document.getElementById("btn-record").addEventListener("click", async () => {
+  if (viewMode === "record") { viewMode = "match"; render(); return; }
+  viewMode = "record";
+  render(); // shows a "loading…" placeholder while we fetch
+  const data = await window.wc.getRecord();
+  record = data;
+  if (viewMode === "record") render();
+});
 document.getElementById("btn-quit").addEventListener("click", () => window.wc.quit());
 
 function applyMode() {
@@ -98,6 +116,8 @@ window.wc.onUpdate((data) => {
 
 // --- rendering ---
 function render() {
+  if (viewMode === "parlay") { body.replaceChildren(); body.appendChild(renderParlays(parlays)); return; }
+  if (viewMode === "record") { body.replaceChildren(); body.appendChild(renderRecord(record)); return; }
   if (!last) return;
   body.replaceChildren();
 
@@ -571,6 +591,155 @@ function renderPicker(matches) {
       h("span", { class: `r ${mt.live ? "live" : ""}`, text: right }),
     ]));
   }
+  return wrap;
+}
+
+// --- daily parlays view ---
+const fmtAm = (ml) => (ml == null ? "-" : ml > 0 ? `+${ml}` : `${ml}`);
+const pctR = (p) => `${Math.round(p * 100)}%`;
+
+// "NED v SWE" → [flag, NED, v, SWE, flag]; falls back to plain text if it can't be split
+function gameTitle(game) {
+  const parts = (game || "").split(" v ");
+  if (parts.length !== 2) return [h("span", { class: "p-title-txt", text: game || "" })];
+  const [hAb, aAb] = parts.map((s) => s.trim());
+  return [
+    flagImg(hAb), h("span", { class: "pk-team", text: hAb }),
+    h("span", { class: "p-v", text: "v" }),
+    h("span", { class: "pk-team", text: aAb }), flagImg(aAb),
+  ].filter(Boolean);
+}
+
+function parlayCard(p, titleNodes, all) {
+  const card = h("div", { class: "parlay" + (all ? " all" : "") });
+  card.appendChild(h("div", { class: "p-head" }, [
+    h("span", { class: "p-title" }, titleNodes),
+    h("span", { class: "p-odds", text: fmtAm(p.americanOdds) }),
+  ]));
+  card.appendChild(h("div", { class: "p-payout", text: `$${p.stake} → $${p.payout.toFixed(2)}` }));
+  for (const l of p.legs) {
+    card.appendChild(h("div", { class: "p-leg" }, [
+      h("span", { class: "p-leg-txt", text: `${l.game} · ${l.market}: ${l.pick}` }),
+      h("span", { class: "p-leg-meta", text: `${fmtAm(l.ml)} · model ${pctR(l.modelProb)} · edge ${l.edge >= 0 ? "+" : ""}${Math.round(l.edge * 100)}%` }),
+    ]));
+    if (l.why) card.appendChild(h("div", { class: "p-why", text: l.why }));
+  }
+  const evGood = p.ev >= 0;
+  const k = p.kelly > 0.002 ? `Kelly ${(p.kelly * 100).toFixed(1)}%` : "Kelly: skip";
+  card.appendChild(h("div", { class: "p-foot" }, [
+    h("span", { text: `model ${pctR(p.modelProb)}` }),
+    h("span", { class: evGood ? "up" : "neg", text: `EV ${evGood ? "+" : ""}$${p.ev.toFixed(2)}` }),
+    h("span", { text: k }),
+  ]));
+  return card;
+}
+
+function renderParlays(data) {
+  titleEl.textContent = "Daily parlays";
+  const wrap = h("div", { class: "parlays" });
+  if (!data) { wrap.appendChild(h("div", { class: "center muted", text: "Building parlays…" })); return wrap; }
+  if (data.error) { wrap.appendChild(h("div", { class: "center muted", text: `Couldn’t build: ${data.error}` })); return wrap; }
+  if (!(data.perGame && data.perGame.length) && !data.cross) {
+    wrap.appendChild(h("div", { class: "center muted", text: "No upcoming games with FanDuel odds yet." }));
+    return wrap;
+  }
+
+  wrap.appendChild(h("div", { class: "muted p-sub", text: `${data.date} · $${data.stake} each` }));
+
+  // all-games parlay (one leg per game) — its own section, up top, highlighted
+  if (data.cross) {
+    wrap.appendChild(h("div", { class: "label", text: "All games · best value, one leg each" }));
+    wrap.appendChild(parlayCard(data.cross, [h("span", { class: "p-title-txt", text: "All games · value" })], true));
+  }
+
+  // longshot parlay (longest-priced +edge leg per game) — max payout, lower hit rate
+  if (data.longshot) {
+    wrap.appendChild(h("div", { class: "label", text: "Longshot · max payout, lower hit rate" }));
+    wrap.appendChild(parlayCard(data.longshot, [h("span", { class: "p-title-txt", text: "Longshot" })], true));
+  }
+
+  // same-game parlays, one per upcoming match
+  const sgp = (data.perGame || []).filter((g) => g.parlay);
+  if (sgp.length) {
+    wrap.appendChild(h("div", { class: "label", text: "Same-game parlays" }));
+    for (const g of sgp) wrap.appendChild(parlayCard(g.parlay, gameTitle(g.game), false));
+  }
+
+  wrap.appendChild(h("div", { class: "disc", text: "⚠ Model estimates, not financial advice. Parlays compound the book’s margin — most are −EV. Stake small." }));
+  return wrap;
+}
+
+// --- record + history view ---
+function historyCard(p) {
+  const result = p.settled ? p.result : "pending"; // "win" | "loss" | "pending"
+  const badge = h("span", { class: `rec-badge ${result}`, text: result === "win" ? "WON" : result === "loss" ? "LOST" : "PENDING" });
+  const title = p.type === "cross" ? "All games" : p.game;
+  const card = h("div", { class: "parlay hist" }, [
+    h("div", { class: "p-head" }, [
+      h("span", { class: "p-title" }, [h("span", { class: "p-title-txt", text: title }), badge]),
+      h("span", { class: "p-odds", text: fmtAm(p.americanOdds) }),
+    ]),
+  ]);
+  for (const l of p.legs) {
+    const r = l.result; // "hit" | "miss" | null
+    const mark = r === "hit" ? "✓" : r === "miss" ? "✗" : "·";
+    card.appendChild(h("div", { class: "p-leg" }, [
+      h("span", { class: `leg-mark ${r || "pend"}`, text: mark }),
+      h("span", { class: "p-leg-txt", text: `${l.game} · ${l.market}: ${l.pick}` }),
+      h("span", { class: "p-leg-meta", text: l.finalScore || fmtAm(l.ml) }),
+    ]));
+  }
+  card.appendChild(h("div", { class: "p-foot" }, [
+    h("span", { text: `$${p.stake} → $${p.payout.toFixed(2)}` }),
+    h("span", {
+      class: result === "win" ? "up" : result === "loss" ? "neg" : "",
+      text: result === "win" ? `+$${(p.payout - p.stake).toFixed(2)}` : result === "loss" ? `−$${p.stake.toFixed(2)}` : "pending",
+    }),
+  ]));
+  return card;
+}
+
+function renderRecord(data) {
+  titleEl.textContent = "Record";
+  const wrap = h("div", { class: "record" });
+  if (!data) { wrap.appendChild(h("div", { class: "center muted", text: "Loading record…" })); return wrap; }
+  if (data.error) { wrap.appendChild(h("div", { class: "center muted", text: `Couldn’t load: ${data.error}` })); return wrap; }
+  const s = data.stats || {};
+  const pct = (p) => (p == null ? "—" : `${Math.round(p * 100)}%`);
+  const money = (v) => (v == null ? "—" : `${v >= 0 ? "+" : "−"}$${Math.abs(v).toFixed(2)}`);
+
+  // headline stats grid
+  const stat = (label, val, cls) => h("div", { class: "rec-stat" }, [
+    h("div", { class: "rec-val " + (cls || ""), text: val }),
+    h("div", { class: "rec-lbl", text: label }),
+  ]);
+  wrap.appendChild(h("div", { class: "rec-grid" }, [
+    stat("Leg hit rate", s.legs ? `${pct(s.legHitRate)}` : "—"),
+    stat("Legs settled", String(s.legs || 0)),
+    stat("Brier", s.brier == null ? "—" : s.brier.toFixed(3)),
+    stat("Parlays won", `${s.parlayWins || 0}/${s.parlays || 0}`),
+    stat("Profit", money(s.profit), (s.profit ?? 0) >= 0 ? "up" : "neg"),
+    stat("ROI", pct(s.roi), (s.roi ?? 0) >= 0 ? "up" : "neg"),
+  ]));
+  if (!s.legs) wrap.appendChild(h("div", { class: "hint", text: "Stats fill in as games finish and settle each morning. Brier = calibration (lower is better)." }));
+
+  // calibration
+  if (s.calibration && s.calibration.length) {
+    wrap.appendChild(h("div", { class: "label", text: "Calibration · model % vs actual" }));
+    for (const b of s.calibration) wrap.appendChild(h("div", { class: "gk" }, [
+      h("span", { text: b.bucket }),
+      h("span", { class: "est", text: `pred ${pct(b.predicted)} → hit ${pct(b.actual)} (n=${b.n})` }),
+    ]));
+  }
+
+  // history of recommended parlays, newest day first
+  wrap.appendChild(h("div", { class: "label", text: "History · recommended parlays" }));
+  if (!data.days || !data.days.length) { wrap.appendChild(h("div", { class: "muted", text: "No parlays logged yet." })); }
+  for (const day of data.days || []) {
+    wrap.appendChild(h("div", { class: "rec-day", text: day.date }));
+    for (const p of day.parlays) wrap.appendChild(historyCard(p));
+  }
+  wrap.appendChild(h("div", { class: "disc", text: "⚠ Player-prop legs can't auto-settle from the score; those parlays stay pending." }));
   return wrap;
 }
 

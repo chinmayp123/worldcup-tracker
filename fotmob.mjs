@@ -135,29 +135,45 @@ function parseForm(tf) {
 
 const orientPair = (pair, aligned) => (!pair ? null : aligned ? pair : { home: pair.away, away: pair.home });
 
-// A team's per-match rates from its most recent finished WC match (Round 1 form), oriented
-// to that team as for/against. team is { name, abbr }. Returns null if no finished match.
-export async function fotmobTeamRates(team) {
+// A team's recent WC form, AVERAGED over its last few finished matches (default 3) — far more
+// stable than a single game, and it actually picks up scoring outbursts/droughts. Rates are
+// oriented as for/against and include REAL goals (from the shotmap), not just xG, so a 7-goal
+// blowout lifts the attack estimate the way the eye test expects. null if no finished match.
+// team is { name, abbr }.
+export async function fotmobTeamRates(team, lookback = 3) {
   try {
     const fixtures = await fetchFotmobFixtures();
-    const played = fixtures.filter((f) => f.finished && (sideMatch(f.home.name, team) || sideMatch(f.away.name, team)));
+    const played = fixtures
+      .filter((f) => f.finished && (sideMatch(f.home.name, team) || sideMatch(f.away.name, team)))
+      .sort((a, b) => String(b.utcTime || "").localeCompare(String(a.utcTime || "")))
+      .slice(0, lookback);
     if (!played.length) return null;
-    played.sort((a, b) => String(b.utcTime || "").localeCompare(String(a.utcTime || "")));
-    const m = await fetchFotmobMatch(played[0].pageUrl);
-    if (!m) return null;
-    const isHome = sideMatch(m.homeTeam.name, team);
-    const pick = (pair) => (pair ? (isHome ? { for: pair.home, against: pair.away } : { for: pair.away, against: pair.home }) : null);
-    const xg = pick(statPair(m.stats, "Expected goals (xG)", "Expected goals"));
-    const corners = pick(statPair(m.stats, "Corners"));
-    const sot = pick(statPair(m.stats, "Shots on target"));
-    const shots = pick(statPair(m.stats, "Total shots", "Shots"));
-    if (!xg && !corners && !sot && !shots) return null;
+    const acc = { xgFor: [], xgAgainst: [], goalsFor: [], goalsAgainst: [], cornersFor: [], cornersAgainst: [], sotFor: [], sotAgainst: [], shotsFor: [], shotsAgainst: [] };
+    for (const f of played) {
+      const m = await fetchFotmobMatch(f.pageUrl);
+      if (!m) continue;
+      const isHome = sideMatch(m.homeTeam.name, team);
+      const pick = (pair) => (pair ? (isHome ? { for: pair.home, against: pair.away } : { for: pair.away, against: pair.home }) : null);
+      const push = (key, pair) => { if (pair) { acc[`${key}For`].push(pair.for); acc[`${key}Against`].push(pair.against); } };
+      push("xg", pick(statPair(m.stats, "Expected goals (xG)", "Expected goals")));
+      push("corners", pick(statPair(m.stats, "Corners")));
+      push("sot", pick(statPair(m.stats, "Shots on target")));
+      push("shots", pick(statPair(m.stats, "Total shots", "Shots")));
+      if ((m.shots || []).length) {
+        const sm = aggregateShotmap(m.shots, m.homeTeam.id, m.awayTeam.id);
+        push("goals", isHome ? { for: sm.home.goals, against: sm.away.goals } : { for: sm.away.goals, against: sm.home.goals });
+      }
+    }
+    const avg = (a, d) => (a.length ? a.reduce((x, y) => x + y, 0) / a.length : d);
+    const games = Math.max(acc.xgFor.length, acc.goalsFor.length, acc.shotsFor.length);
+    if (!games) return null;
     return {
-      games: 1,
-      xgFor: xg?.for ?? 1.2, xgAgainst: xg?.against ?? 1.2,
-      cornersFor: corners?.for ?? 5, cornersAgainst: corners?.against ?? 5,
-      sotFor: sot?.for ?? 4, sotAgainst: sot?.against ?? 4,
-      shotsFor: shots?.for ?? 12, shotsAgainst: shots?.against ?? 12,
+      games,
+      xgFor: avg(acc.xgFor, 1.3), xgAgainst: avg(acc.xgAgainst, 1.3),
+      goalsFor: avg(acc.goalsFor, 1.3), goalsAgainst: avg(acc.goalsAgainst, 1.3),
+      cornersFor: avg(acc.cornersFor, 5), cornersAgainst: avg(acc.cornersAgainst, 5),
+      sotFor: avg(acc.sotFor, 4), sotAgainst: avg(acc.sotAgainst, 4),
+      shotsFor: avg(acc.shotsFor, 12), shotsAgainst: avg(acc.shotsAgainst, 12),
     };
   } catch {
     return null;
