@@ -356,7 +356,7 @@ function renderMatch(m) {
       const scorers = all.filter((p) => p.scoreProb > 0).sort((a, b) => b.scoreProb - a.scoreProb).slice(0, 6);
       if (scorers.length) {
         blocks.push(h("div", { class: "label", text: "Predicted scorers · anytime" + (fdScorers.length ? " · FanDuel price" : " (model est.)") }));
-        blocks.push(h("div", { class: "hint", text: "Model % from recent xG vs FanDuel's price (implied %). ▲ = model rates higher than the price. Display-only." }));
+        blocks.push(h("div", { class: "hint", text: "Model % from recent xG (adjusted for the opponent's defence) vs FanDuel's price (implied %). ▲ = model rates higher than the price. Display-only." }));
         for (const p of scorers) {
           const fdp = fdFor(p.name);
           const value = fdp && fdp.implied != null && p.scoreProb > fdp.implied;

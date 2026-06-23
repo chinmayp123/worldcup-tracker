@@ -1160,7 +1160,9 @@ export async function getWidgetState(query) {
     // the projected shots-on-target and predicted-scorer sections in the widget
     if (isPre) {
       try {
-        const [hp, ap] = await Promise.all([fotmobPlayerSOT(homeRef), fotmobPlayerSOT(awayRef)]);
+        // pass each side's opponent so the per-player projection is matchup-adjusted (home
+        // players vs the away defence, and vice-versa)
+        const [hp, ap] = await Promise.all([fotmobPlayerSOT(homeRef, awayRef), fotmobPlayerSOT(awayRef, homeRef)]);
         if ((hp && hp.length) || (ap && ap.length)) view.playerProj = { home: hp || [], away: ap || [] };
       } catch { /* best-effort */ }
     }

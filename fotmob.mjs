@@ -180,12 +180,13 @@ export async function fotmobTeamRates(team, lookback = 3) {
   }
 }
 
-// Per-player shots-on-target projection from a team's recent shotmaps (default last 3 games).
-// For each recent match we read the shotmap, keep this team's players, and average their SOT per
-// game. Returns the top projected players [{ name, projSOT, shotsPg, xgPg, games }] or null.
-// DISPLAY-ONLY: there's no free way to de-vig player props into a fair line, so this informs the
-// eye, it doesn't become a bet. team is { name, abbr }.
-export async function fotmobPlayerSOT(team, lookback = 3) {
+// Per-player shots-on-target + anytime-score projection from a team's recent shotmaps (last 3
+// games). For each recent match we read the shotmap, keep this team's players, and average their
+// SOT/xG per game. When `opponent` is given, each player's xG (and SOT) is scaled by how leaky
+// that opponent's defence has been vs a tournament average — so the projection is matchup-aware,
+// like the corner/shots/saves projections, instead of raw form. team/opponent are { name, abbr }.
+// DISPLAY-ONLY: there's no free way to de-vig player props into a fair line, so it informs the eye.
+export async function fotmobPlayerSOT(team, opponent = null, lookback = 3) {
   try {
     const fixtures = await fetchFotmobFixtures();
     const played = fixtures
@@ -209,11 +210,23 @@ export async function fotmobPlayerSOT(team, lookback = 3) {
       }
     }
     if (!mp) return null;
+    // opponent-defence adjustment: scale by how leaky the opponent has been vs a tournament
+    // average (clamped so a noisy 3-game sample can't swing it wildly). 1 = no opponent given.
+    const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+    let xgFactor = 1, sotFactor = 1, adjusted = false;
+    if (opponent) {
+      const opp = await fotmobTeamRates(opponent, lookback).catch(() => null);
+      if (opp) {
+        if (opp.xgAgainst) xgFactor = clamp(opp.xgAgainst / 1.3, 0.6, 1.6);
+        if (opp.sotAgainst) sotFactor = clamp(opp.sotAgainst / 4, 0.6, 1.6);
+        adjusted = true;
+      }
+    }
     const players = [...agg.values()]
       .map((r) => {
-        const xgPg = r.xg / mp;
-        // anytime-score probability from recent xG/game (Poisson: P(>=1 goal) = 1 - e^-xg)
-        return { name: r.name, projSOT: r.sot / mp, shotsPg: r.shots / mp, xgPg, scoreProb: 1 - Math.exp(-xgPg), games: mp };
+        const xgPg = (r.xg / mp) * xgFactor;
+        // anytime-score probability from (opponent-adjusted) xG/game (Poisson: P(>=1 goal) = 1 - e^-xg)
+        return { name: r.name, projSOT: (r.sot / mp) * sotFactor, shotsPg: r.shots / mp, xgPg, scoreProb: 1 - Math.exp(-xgPg), games: mp, adjusted };
       })
       .filter((p) => p.projSOT > 0 || p.xgPg > 0)
       .sort((a, b) => b.xgPg - a.xgPg)
