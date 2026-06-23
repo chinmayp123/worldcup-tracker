@@ -7,6 +7,7 @@ contextBridge.exposeInMainWorld("wc", {
   setMatch: (query) => ipcRenderer.invoke("set-match", query),
   getParlays: () => ipcRenderer.invoke("get-parlays"),
   getRecord: () => ipcRenderer.invoke("get-record"),
+  getStandings: () => ipcRenderer.invoke("get-standings"),
   toggleExpand: () => ipcRenderer.invoke("toggle-expand"),
   togglePin: () => ipcRenderer.invoke("toggle-pin"),
   refresh: () => ipcRenderer.invoke("refresh"),

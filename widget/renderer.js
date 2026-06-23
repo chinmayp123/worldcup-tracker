@@ -4,13 +4,41 @@
 const app = document.getElementById("app");
 const body = document.getElementById("body");
 const titleEl = document.getElementById("title");
+const freshEl = document.getElementById("fresh");
 
 let expanded = false;
 let pinned = true;
-let viewMode = "match"; // "match" | "pick" | "parlay" | "record"
+let viewMode = "match"; // "match" | "pick" | "parlay" | "record" | "standings"
 let last = null;        // last data payload
 let parlays = null;     // last fetched daily-parlays payload (lazy, on opening the view)
 let record = null;      // last fetched bet record + history (lazy, on opening the view)
+let standings = null;   // last fetched group standings + bracket (lazy, on opening the view)
+let lastUpdateAt = 0;   // wall-clock of the last data push, for the freshness chip
+
+// highlight whichever control matches the current view/expand state
+function syncBar() {
+  document.getElementById("btn-pick").classList.toggle("on", viewMode === "pick");
+  document.getElementById("btn-parlays").classList.toggle("on", viewMode === "parlay");
+  document.getElementById("btn-record").classList.toggle("on", viewMode === "record");
+  document.getElementById("btn-standings").classList.toggle("on", viewMode === "standings");
+  document.getElementById("btn-expand").classList.toggle("on", expanded);
+}
+
+// brief fade on the body — only for deliberate view switches, not background refreshes
+function fadeBody() { body.classList.remove("swap"); void body.offsetWidth; body.classList.add("swap"); }
+
+// "updated Ns ago" chip; goes amber once the data is over ~2.5 min old
+function tickFresh() {
+  if (!lastUpdateAt) { freshEl.hidden = true; return; }
+  const s = Math.max(0, Math.round((Date.now() - lastUpdateAt) / 1000));
+  const txt = s < 5 ? "now" : s < 60 ? `${s}s` : s < 3600 ? `${Math.floor(s / 60)}m` : `${Math.floor(s / 3600)}h`;
+  freshEl.hidden = false;
+  freshEl.textContent = txt;
+  freshEl.title = `Updated ${txt === "now" ? "just now" : txt + " ago"} · click to refresh`;
+  freshEl.classList.toggle("stale", s > 150);
+}
+freshEl.addEventListener("click", () => { freshEl.textContent = "…"; window.wc.refresh(); });
+setInterval(tickFresh, 1000);
 
 // tiny DOM helper
 function h(tag, opts = {}, kids = []) {
@@ -69,7 +97,7 @@ function colorClose(a, b) {
 // --- controls ---
 document.getElementById("btn-expand").addEventListener("click", async () => {
   expanded = await window.wc.toggleExpand();
-  applyMode(); render();
+  applyMode(); fadeBody(); render();
 });
 document.getElementById("btn-pin").addEventListener("click", async () => {
   pinned = await window.wc.togglePin();
@@ -77,23 +105,31 @@ document.getElementById("btn-pin").addEventListener("click", async () => {
 });
 document.getElementById("btn-pick").addEventListener("click", () => {
   viewMode = viewMode === "pick" ? "match" : "pick";
-  render();
+  fadeBody(); render();
 });
 document.getElementById("btn-parlays").addEventListener("click", async () => {
-  if (viewMode === "parlay") { viewMode = "match"; render(); return; }
+  if (viewMode === "parlay") { viewMode = "match"; fadeBody(); render(); return; }
   viewMode = "parlay";
-  render(); // shows a "building…" placeholder while we fetch
+  fadeBody(); render(); // shows a "building…" placeholder while we fetch
   const data = await window.wc.getParlays();
   parlays = data;
   if (viewMode === "parlay") render(); // only redraw if the user is still on this view
 });
 document.getElementById("btn-record").addEventListener("click", async () => {
-  if (viewMode === "record") { viewMode = "match"; render(); return; }
+  if (viewMode === "record") { viewMode = "match"; fadeBody(); render(); return; }
   viewMode = "record";
-  render(); // shows a "loading…" placeholder while we fetch
+  fadeBody(); render(); // shows a "loading…" placeholder while we fetch
   const data = await window.wc.getRecord();
   record = data;
   if (viewMode === "record") render();
+});
+document.getElementById("btn-standings").addEventListener("click", async () => {
+  if (viewMode === "standings") { viewMode = "match"; fadeBody(); render(); return; }
+  viewMode = "standings";
+  fadeBody(); render(); // shows a "loading…" placeholder while we fetch
+  const data = await window.wc.getStandings();
+  standings = data;
+  if (viewMode === "standings") render();
 });
 document.getElementById("btn-quit").addEventListener("click", () => window.wc.quit());
 
@@ -106,18 +142,25 @@ window.wc.onConfig((cfg) => {
   expanded = !!cfg.expanded;
   pinned = !!cfg.pinned;
   document.getElementById("btn-pin").classList.toggle("on", pinned);
-  applyMode();
+  applyMode(); syncBar();
 });
 
 window.wc.onUpdate((data) => {
   last = data;
+  lastUpdateAt = Date.now();
+  tickFresh();
   render();
 });
 
+// centered spinner + label for loading/placeholder states
+const spinner = (text) => h("div", { class: "center" }, [h("div", { class: "spinner" }), h("div", { class: "muted", text })]);
+
 // --- rendering ---
 function render() {
+  syncBar();
   if (viewMode === "parlay") { body.replaceChildren(); body.appendChild(renderParlays(parlays)); return; }
   if (viewMode === "record") { body.replaceChildren(); body.appendChild(renderRecord(record)); return; }
+  if (viewMode === "standings") { body.replaceChildren(); body.appendChild(renderStandings(standings)); return; }
   if (!last) return;
   body.replaceChildren();
 
@@ -154,7 +197,10 @@ function renderMatch(m) {
   app.style.setProperty("--away", awayColor);
 
   // status + score (with country flags)
-  blocks.push(h("div", { class: `live ${liveClass(m)}`, text: (m.state === "in" ? "● " : "") + m.statusText }));
+  const liveEl = h("div", { class: `live ${liveClass(m)}` });
+  if (m.state === "in") liveEl.appendChild(h("span", { class: "dot" }));
+  liveEl.appendChild(document.createTextNode(m.statusText));
+  blocks.push(liveEl);
   blocks.push(h("div", { class: "score-row" }, [
     h("div", { class: "side home" }, [
       flagImg(m.home.abbr, m.home.logo),
@@ -270,15 +316,29 @@ function renderMatch(m) {
       sv(m.home.abbr, pg.saves.home);
       sv(m.away.abbr, pg.saves.away);
     }
-    if (m.sotProjections && ((m.sotProjections.home || []).length || (m.sotProjections.away || []).length)) {
+    if (m.playerProj && ((m.playerProj.home || []).length || (m.playerProj.away || []).length)) {
+      const all = [
+        ...(m.playerProj.home || []).map((p) => ({ ...p, abbr: m.home.abbr })),
+        ...(m.playerProj.away || []).map((p) => ({ ...p, abbr: m.away.abbr })),
+      ];
+      // predicted scorers — top anytime-score probabilities across both sides
+      const scorers = all.filter((p) => p.scoreProb > 0).sort((a, b) => b.scoreProb - a.scoreProb).slice(0, 6);
+      if (scorers.length) {
+        blocks.push(h("div", { class: "label", text: "Predicted scorers · anytime (model est.)" }));
+        blocks.push(h("div", { class: "hint", text: "From each player's recent xG. Display-only — no bettable de-vigged line." }));
+        for (const p of scorers) blocks.push(h("div", { class: "gk" }, [
+          h("span", { text: `${p.abbr} ${p.name}` }),
+          h("span", { class: "est", text: `${Math.round(p.scoreProb * 100)}% · ${p.xgPg.toFixed(2)} xG/g` }),
+        ]));
+      }
+      // projected shots on target — per side, sorted by SOT
       blocks.push(h("div", { class: "label", text: "Projected shots on target · per player (model est.)" }));
-      blocks.push(h("div", { class: "hint", text: "From each player's recent shotmaps. Display-only — no bettable de-vigged line." }));
-      const rows = (arr, abbr) => (arr || []).forEach((p) => blocks.push(h("div", { class: "gk" }, [
+      const rows = (arr, abbr) => [...(arr || [])].sort((a, b) => b.projSOT - a.projSOT).slice(0, 4).forEach((p) => blocks.push(h("div", { class: "gk" }, [
         h("span", { text: `${abbr} ${p.name}` }),
-        h("span", { class: "est", text: `proj ${p.projSOT.toFixed(1)} SOT · ${p.xgPg.toFixed(2)} xG/g (${p.games}g)` }),
+        h("span", { class: "est", text: `proj ${p.projSOT.toFixed(1)} SOT (${p.games}g)` }),
       ])));
-      rows(m.sotProjections.home, m.home.abbr);
-      rows(m.sotProjections.away, m.away.abbr);
+      rows(m.playerProj.home, m.home.abbr);
+      rows(m.playerProj.away, m.away.abbr);
     }
     if (m.conditions) {
       const cd = m.conditions;
@@ -570,7 +630,7 @@ function renderPicker(matches) {
   const wrap = h("div", { class: "pick" });
   if (!matches.length) { wrap.appendChild(h("div", { class: "center muted", text: "No matches found." })); return wrap; }
 
-  wrap.appendChild(h("div", { class: "muted pick-hint", text: "middle = predicted final (model)" }));
+  wrap.appendChild(h("div", { class: "muted pick-hint", text: "dim score = model's predicted final" }));
 
   // auto-track option
   wrap.appendChild(h("div", { class: "row", onclick: () => choose(null) }, [
@@ -587,15 +647,16 @@ function renderPicker(matches) {
     const right = mt.live ? mt.statusText : mt.state === "post" ? "FT" : new Date(mt.date).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
     const predTxt = mt.pred ? `${mt.pred.ph}–${mt.pred.pa}` : "";
     const predTitle = mt.pred ? `predicted: ${mt.homeAbbr} ${Math.round(mt.pred.wH * 100)}% / Draw ${Math.round(mt.pred.wD * 100)}% / ${mt.awayAbbr} ${Math.round(mt.pred.wA * 100)}%` : "";
-    const teamEl = (abbr, color) => { const s = h("span", { class: "pk-team", text: abbr }); if (color) s.style.color = color; return s; };
+    // teams stay a uniform colour — the flags carry the team identity (colouring text too is noise)
+    const teamEl = (abbr) => h("span", { class: "pk-team", text: abbr });
     const left = h("span", { class: "l" }, [
       flagImg(mt.homeAbbr, mt.homeLogo),
-      teamEl(mt.homeAbbr, mt.homeColor),
+      teamEl(mt.homeAbbr),
       h("span", { class: "pk-score", text: score }),
-      teamEl(mt.awayAbbr, mt.awayColor),
+      teamEl(mt.awayAbbr),
       flagImg(mt.awayAbbr, mt.awayLogo),
     ].filter(Boolean));
-    wrap.appendChild(h("div", { class: "row", onclick: () => choose(mt.id) }, [
+    wrap.appendChild(h("div", { class: `row ${mt.live ? "islive" : ""}`, onclick: () => choose(mt.id) }, [
       left,
       h("span", { class: "pred-mini", text: predTxt, title: predTitle }),
       h("span", { class: `r ${mt.live ? "live" : ""}`, text: right }),
@@ -647,7 +708,7 @@ function parlayCard(p, titleNodes, all) {
 function renderParlays(data) {
   titleEl.textContent = "Daily parlays";
   const wrap = h("div", { class: "parlays" });
-  if (!data) { wrap.appendChild(h("div", { class: "center muted", text: "Building parlays…" })); return wrap; }
+  if (!data) { wrap.appendChild(spinner("Building parlays…")); return wrap; }
   if (data.error) { wrap.appendChild(h("div", { class: "center muted", text: `Couldn’t build: ${data.error}` })); return wrap; }
   if (!(data.perGame && data.perGame.length) && !data.cross) {
     wrap.appendChild(h("div", { class: "center muted", text: "No upcoming games with FanDuel odds yet." }));
@@ -712,7 +773,7 @@ function historyCard(p) {
 function renderRecord(data) {
   titleEl.textContent = "Record";
   const wrap = h("div", { class: "record" });
-  if (!data) { wrap.appendChild(h("div", { class: "center muted", text: "Loading record…" })); return wrap; }
+  if (!data) { wrap.appendChild(spinner("Loading record…")); return wrap; }
   if (data.error) { wrap.appendChild(h("div", { class: "center muted", text: `Couldn’t load: ${data.error}` })); return wrap; }
   const s = data.stats || {};
   const pct = (p) => (p == null ? "—" : `${Math.round(p * 100)}%`);
@@ -775,6 +836,61 @@ function renderRecord(data) {
     for (const p of day.parlays) wrap.appendChild(historyCard(p));
   }
   wrap.appendChild(h("div", { class: "disc", text: "⚠ Player-prop legs can't auto-settle from the score; those parlays stay pending." }));
+  return wrap;
+}
+
+// --- standings / bracket view ---
+function renderStandings(data) {
+  titleEl.textContent = "Standings";
+  const wrap = h("div", { class: "stand" });
+  if (!data) { wrap.appendChild(h("div", { class: "center muted", text: "Loading standings…" })); return wrap; }
+  if (data.error) { wrap.appendChild(h("div", { class: "center muted", text: `Couldn’t load: ${data.error}` })); return wrap; }
+
+  // group stage shows the tables; once every group is complete it flips to the knockout bracket
+  if (data.groupStageDone) return renderBracket(wrap, data);
+
+  if (!data.groups || !data.groups.length) { wrap.appendChild(h("div", { class: "center muted", text: "No standings yet." })); return wrap; }
+  wrap.appendChild(h("div", { class: "muted pick-hint", text: "green = advancing · top 2 per group" }));
+  for (const g of data.groups) {
+    wrap.appendChild(h("div", { class: "label", text: g.name }));
+    const tbl = h("table", { class: "standtbl" });
+    tbl.appendChild(h("tr", { class: "hd" }, [
+      h("td", { text: "" }), h("td", { class: "num", text: "P" }), h("td", { class: "num", text: "W-D-L" }),
+      h("td", { class: "num", text: "GD" }), h("td", { class: "num", text: "Pts" }),
+    ]));
+    for (const e of g.entries) tbl.appendChild(h("tr", { class: e.advanced ? "adv" : "" }, [
+      h("td", { class: "tm" }, [flagImg(e.abbr, e.logo), h("span", { class: "pk-team", text: e.abbr })].filter(Boolean)),
+      h("td", { class: "num", text: String(e.played) }),
+      h("td", { class: "num", text: `${e.w}-${e.d}-${e.l}` }),
+      h("td", { class: "num", text: String(e.gd) }),
+      h("td", { class: "num pts", text: String(e.pts) }),
+    ]));
+    wrap.appendChild(tbl);
+  }
+  return wrap;
+}
+
+function renderBracket(wrap, data) {
+  titleEl.textContent = "Bracket";
+  if (!data.knockout || !data.knockout.length) {
+    wrap.appendChild(h("div", { class: "center muted", text: "Group stage done — knockout fixtures not posted yet." }));
+    return wrap;
+  }
+  for (const round of data.knockout) {
+    wrap.appendChild(h("div", { class: "label", text: round.label }));
+    for (const g of round.games) {
+      const score = g.state === "pre" ? "vs" : `${g.homeScore}–${g.awayScore}`;
+      const right = g.state === "in" ? (g.statusText || "LIVE") : g.state === "post" ? "FT" : new Date(g.date).toLocaleDateString([], { month: "short", day: "numeric" });
+      wrap.appendChild(h("div", { class: `brk-game ${g.state === "in" ? "islive" : ""}`, onclick: () => choose(g.id) }, [
+        h("span", { class: "l" }, [
+          flagImg(g.homeAbbr, g.homeLogo), h("span", { class: "pk-team", text: g.homeAbbr }),
+          h("span", { class: "pk-score", text: score }),
+          h("span", { class: "pk-team", text: g.awayAbbr }), flagImg(g.awayAbbr, g.awayLogo),
+        ].filter(Boolean)),
+        h("span", { class: `r ${g.state === "in" ? "live" : ""}`, text: right }),
+      ]));
+    }
+  }
   return wrap;
 }
 

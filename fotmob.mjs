@@ -210,10 +210,14 @@ export async function fotmobPlayerSOT(team, lookback = 3) {
     }
     if (!mp) return null;
     const players = [...agg.values()]
-      .map((r) => ({ name: r.name, projSOT: r.sot / mp, shotsPg: r.shots / mp, xgPg: r.xg / mp, games: mp }))
-      .filter((p) => p.projSOT > 0)
-      .sort((a, b) => b.projSOT - a.projSOT)
-      .slice(0, 5);
+      .map((r) => {
+        const xgPg = r.xg / mp;
+        // anytime-score probability from recent xG/game (Poisson: P(>=1 goal) = 1 - e^-xg)
+        return { name: r.name, projSOT: r.sot / mp, shotsPg: r.shots / mp, xgPg, scoreProb: 1 - Math.exp(-xgPg), games: mp };
+      })
+      .filter((p) => p.projSOT > 0 || p.xgPg > 0)
+      .sort((a, b) => b.xgPg - a.xgPg)
+      .slice(0, 8);
     return players.length ? players : null;
   } catch {
     return null;

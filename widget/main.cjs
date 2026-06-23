@@ -181,6 +181,11 @@ ipcMain.handle("get-record", async () => {
   try { return await lib.getRecord(); }
   catch (e) { return { error: String(e?.message || e) }; }
 });
+// group standings + knockout bracket for the Standings view; never throws to the renderer
+ipcMain.handle("get-standings", async () => {
+  try { return await lib.getStandings(); }
+  catch (e) { return { error: String(e?.message || e) }; }
+});
 ipcMain.handle("refresh", () => poll());
 ipcMain.handle("hide", () => win?.hide()); // no longer wired to a button; tray menu uses win.hide() directly
 ipcMain.handle("quit", () => app.quit());

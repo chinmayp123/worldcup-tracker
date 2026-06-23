@@ -1035,6 +1035,65 @@ export async function getRecord() {
   }
 }
 
+// knockout rounds in bracket order (ESPN season.slug)
+const KO_ORDER = ["round-of-32", "round-of-16", "quarterfinals", "semifinals", "third-place", "final"];
+const KO_LABEL = { "round-of-32": "Round of 32", "round-of-16": "Round of 16", quarterfinals: "Quarter-finals", semifinals: "Semi-finals", "third-place": "Third place", final: "Final" };
+
+// scan a window of fixtures for knockout games (season.slug != group-stage), grouped by round
+async function scanKnockout() {
+  const boards = await Promise.all(Array.from({ length: 16 }, (_, i) => scoreboardOn(ymd(i - 2)).catch(() => ({ events: [] }))));
+  const seen = new Set(), byRound = new Map();
+  for (const b of boards) for (const ev of b.events || []) {
+    const slug = ev.season?.slug || "";
+    if (!slug || slug === "group-stage" || seen.has(ev.id)) continue;
+    seen.add(ev.id);
+    const c = ev.competitions[0];
+    const home = c.competitors.find((t) => t.homeAway === "home"), away = c.competitors.find((t) => t.homeAway === "away");
+    const st = c.status.type.state;
+    (byRound.get(slug) || byRound.set(slug, []).get(slug)).push({
+      id: ev.id, date: ev.date,
+      homeAbbr: home.team.abbreviation, awayAbbr: away.team.abbreviation, homeLogo: home.team.logo, awayLogo: away.team.logo,
+      homeScore: Number(home.score) || 0, awayScore: Number(away.score) || 0,
+      state: st, statusText: st === "in" ? (c.status.displayClock || "LIVE") : st === "post" ? "FT" : null,
+    });
+  }
+  return [...byRound.entries()]
+    .sort((a, b) => KO_ORDER.indexOf(a[0]) - KO_ORDER.indexOf(b[0]))
+    .map(([slug, games]) => ({ slug, label: KO_LABEL[slug] || slug, games: games.sort((x, y) => new Date(x.date) - new Date(y.date)) }));
+}
+
+// group standings (all 12 groups) + a knockout bracket once the group stage finishes. Cached.
+let standingsCache = { at: 0, data: null };
+const STANDINGS_TTL = 10 * 60 * 1000;
+export async function getStandings() {
+  const now = Date.now();
+  if (standingsCache.data && now - standingsCache.at < STANDINGS_TTL) return standingsCache.data;
+  try {
+    const j = await getJSON("https://site.api.espn.com/apis/v2/sports/soccer/fifa.world/standings");
+    const num = (st, k) => (st[k] ? (st[k].value ?? parseFloat(st[k].displayValue)) : null);
+    const groups = (j.children || []).map((g) => {
+      const entries = (g.standings?.entries || []).map((e) => {
+        const st = Object.fromEntries((e.stats || []).map((s) => [s.name, s]));
+        return {
+          abbr: e.team?.abbreviation || "", name: e.team?.displayName || "", logo: e.team?.logos?.[0]?.href || null,
+          rank: num(st, "rank"), played: num(st, "gamesPlayed") || 0,
+          w: num(st, "wins") || 0, d: num(st, "ties") || 0, l: num(st, "losses") || 0,
+          gd: st.pointDifferential?.displayValue ?? String(num(st, "pointDifferential") ?? "0"),
+          pts: num(st, "points") || 0, advanced: num(st, "advanced") === 1,
+        };
+      }).sort((a, b) => (a.rank || 9) - (b.rank || 9));
+      return { name: g.name || g.abbreviation || "Group", entries };
+    });
+    const groupStageDone = groups.length > 0 && groups.every((g) => g.entries.length && g.entries.every((e) => e.played >= 3));
+    const knockout = await scanKnockout().catch(() => []);
+    const data = { groups, groupStageDone, knockout };
+    standingsCache = { at: now, data };
+    return data;
+  } catch (e) {
+    return { error: String(e?.message || e), groups: [], knockout: [] };
+  }
+}
+
 // high-level state for the widget: a single match view (by query, or the lone live game),
 // plus the day's match list for the picker. Never throws — returns { error } instead.
 export async function getWidgetState(query) {
@@ -1097,11 +1156,12 @@ export async function getWidgetState(query) {
       if (saved) pregame = { ...saved, basis: `${saved.basis || "pre"} · saved pre-kickoff` };
     }
     const view = buildMatchView(ev, sum, liveOdds, realXG, publicBetting, pregame, conditions);
-    // pre-match per-player shots-on-target projections (model est., display-only) from recent form
+    // pre-match per-player projections (model est., display-only) from recent form — feeds both
+    // the projected shots-on-target and predicted-scorer sections in the widget
     if (isPre) {
       try {
-        const [hsot, asot] = await Promise.all([fotmobPlayerSOT(homeRef), fotmobPlayerSOT(awayRef)]);
-        if ((hsot && hsot.length) || (asot && asot.length)) view.sotProjections = { home: hsot || [], away: asot || [] };
+        const [hp, ap] = await Promise.all([fotmobPlayerSOT(homeRef), fotmobPlayerSOT(awayRef)]);
+        if ((hp && hp.length) || (ap && ap.length)) view.playerProj = { home: hp || [], away: ap || [] };
       } catch { /* best-effort */ }
     }
     // player props: prefer The Odds API (multi-book, de-vigged consensus). When it's
