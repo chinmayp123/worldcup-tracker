@@ -37,7 +37,7 @@ async function main() {
     `Generated ${new Date().toLocaleString()}`,
     "",
     formatParlays(out),
-    out.perGame.length ? "" : "(no upcoming games with FanDuel odds posted yet)",
+    out.singles.length ? "" : "(no upcoming games with FanDuel odds posted yet)",
     statsBlock(),
   ].join("\n");
   console.log(text);

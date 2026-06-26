@@ -760,37 +760,31 @@ function parlayCard(p, titleNodes, all) {
 }
 
 function renderParlays(data) {
-  titleEl.textContent = "Daily parlays";
+  titleEl.textContent = "Daily singles";
   const wrap = h("div", { class: "parlays" });
-  if (!data) { wrap.appendChild(spinner("Building parlays…")); return wrap; }
+  if (!data) { wrap.appendChild(spinner("Building bets…")); return wrap; }
   if (data.error) { wrap.appendChild(h("div", { class: "center muted", text: `Couldn’t build: ${data.error}` })); return wrap; }
-  if (!(data.perGame && data.perGame.length) && !data.cross) {
-    wrap.appendChild(h("div", { class: "center muted", text: "No upcoming games with FanDuel odds yet." }));
+  const singles = data.singles || [];
+  if (!singles.length && !data.longshot) {
+    wrap.appendChild(h("div", { class: "center muted", text: "No qualifying bets on this slate yet." }));
     return wrap;
   }
 
   wrap.appendChild(h("div", { class: "muted p-sub", text: `${data.date} · $${data.stake} each` }));
 
-  // all-games parlay (one leg per game) — its own section, up top, highlighted
-  if (data.cross) {
-    wrap.appendChild(h("div", { class: "label", text: "All games · best value, one leg each" }));
-    wrap.appendChild(parlayCard(data.cross, [h("span", { class: "p-title-txt", text: "All games · value" })], true));
+  // PRIMARY (tracked): one straight single per game — the best in-band leg
+  if (singles.length) {
+    wrap.appendChild(h("div", { class: "label", text: "Singles · one bet per game" }));
+    for (const g of singles) wrap.appendChild(parlayCard(g.bet, gameTitle(g.game), false));
   }
 
-  // longshot parlay (longest-priced +edge leg per game) — max payout, lower hit rate
+  // FOR FUN (not tracked): one cross-game longshot, one leg per game — max payout, low hit rate
   if (data.longshot) {
-    wrap.appendChild(h("div", { class: "label", text: "Longshot · max payout, lower hit rate" }));
+    wrap.appendChild(h("div", { class: "label", text: "For fun · longshot, one leg per game (not tracked)" }));
     wrap.appendChild(parlayCard(data.longshot, [h("span", { class: "p-title-txt", text: "Longshot" })], true));
   }
 
-  // same-game parlays, one per upcoming match
-  const sgp = (data.perGame || []).filter((g) => g.parlay);
-  if (sgp.length) {
-    wrap.appendChild(h("div", { class: "label", text: "Same-game parlays" }));
-    for (const g of sgp) wrap.appendChild(parlayCard(g.parlay, gameTitle(g.game), false));
-  }
-
-  wrap.appendChild(h("div", { class: "disc", text: "⚠ Model estimates, not financial advice. Parlays compound the book’s margin — most are −EV. Stake small." }));
+  wrap.appendChild(h("div", { class: "disc", text: "⚠ Model estimates, not financial advice. Only the singles are tracked; the longshot is just for fun. Stake small." }));
   return wrap;
 }
 

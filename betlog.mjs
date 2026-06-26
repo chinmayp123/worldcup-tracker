@@ -19,13 +19,13 @@ function write(data) {
   writeFileSync(LOG_FILE, JSON.stringify(data, null, 2));
 }
 
-// append a day's parlays (from generateDailyParlays). Idempotent per date — re-running the same
-// morning replaces that date's entry rather than duplicating it.
+// append a day's bets (from generateDailyParlays). Only the straight SINGLES are tracked — the
+// for-fun longshot is display-only and never logged, so the record/calibration reflect the real
+// strategy. Idempotent per date — re-running the same morning replaces that date's entry.
 export function recordDay(out) {
   const data = read();
   const parlays = [];
-  for (const g of out.perGame) if (g.parlay) parlays.push({ type: "same-game", game: g.game, ...g.parlay, settled: false, result: null });
-  if (out.cross) parlays.push({ type: "cross", game: "ALL GAMES", ...out.cross, settled: false, result: null });
+  for (const g of out.singles || []) if (g.bet) parlays.push({ type: "single", game: g.game, ...g.bet, settled: false, result: null });
   data.days = (data.days || []).filter((d) => d.date !== out.date);
   data.days.push({ date: out.date, stake: out.stake, parlays });
   data.days.sort((a, b) => a.date.localeCompare(b.date));

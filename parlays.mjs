@@ -1,13 +1,20 @@
-// parlays — daily $10 parlay generator for the FanDuel bankroll experiment.
+// parlays — daily $10 STRAIGHT-SINGLES generator for the FanDuel bankroll experiment.
 //
-// For each upcoming game it builds candidate legs (moneyline + total) from the model's
-// probabilities priced against real FanDuel odds, assembles a balanced same-game parlay per
-// game, plus one cross-game parlay (best leg per game). Every leg carries the model probability
-// so the bet log can settle each leg individually and feed the calibration loop.
+// For each upcoming game it builds candidate legs (moneyline + total + corners + BTTS + scorer)
+// from the model's probabilities priced against real FanDuel odds, then bets the single best
+// in-band leg per game as a STRAIGHT SINGLE. Singles are the tracked card: they let a real edge
+// express itself instead of compounding the book's margin across correlated same-game legs. A
+// single cross-game longshot (one leg per game) is still produced, but purely "for fun" — it is
+// NOT logged or settled.
 //
-// HONEST NOTE: parlays compound the book's margin, so most are -EV even when legs have small
-// edges — Kelly will often say "skip". Same-game parlay odds here MULTIPLY leg prices as an
-// estimate; FanDuel's actual SGP price is correlation-adjusted and will be shorter.
+// WHY SINGLES: a 3-leg same-game parlay multiplies both the model's probabilities AND its errors,
+// and the legs are correlated (Under + Draw + BTTS-No all die together when a game runs hot), so
+// the parlay concentrates risk instead of spreading it. Singles fix the structurally-low hit rate.
+//
+// WHY THE EDGE BAND: every leg's edge is measured vs the real FanDuel price. Below EDGE_MIN there's
+// no value; at/above EDGE_MAX the "edge" is almost certainly model error against a sharp market, so
+// the leg is DISCARDED (the old model capped these and then bet them — and ranked by edge, so it
+// picked the biggest model errors first). MAX_EDGE now only shrinks the prob used for EV/Kelly.
 
 import { scoreboardOn, ymd, summary, scorePrediction, pregameProjections, matchConditions, poissonCdf } from "./lib.mjs";
 import { fotmobXG, fotmobPlayerSOT } from "./fotmob.mjs";
@@ -18,11 +25,18 @@ import { oddspapiCorners, oddspapiBTTS } from "./oddspapi.mjs";
 const amToDec = (ml) => (ml == null ? null : ml > 0 ? ml / 100 + 1 : 100 / -ml + 1);
 const decToAm = (d) => (d >= 2 ? Math.round((d - 1) * 100) : Math.round(-100 / (d - 1)));
 const fmtAm = (ml) => (ml == null ? "-" : ml > 0 ? `+${ml}` : `${ml}`);
-// believable ceiling on a single-leg edge. A double-digit edge on a major market is model error,
-// not free money — we shrink anything past this toward the market price (see pushLeg).
-const MAX_EDGE = 0.10;
-// a Draw is allowed back into the card (even when it isn't the predicted result) only if its
-// capped edge clears this — i.e. a real value draw like 6/20's +700 ECU, not every coin-flip.
+// believable BAND for a single leg's edge vs the real market price. Below EDGE_MIN there's no
+// real value worth betting; at/above EDGE_MAX the disagreement with a sharp book is almost
+// certainly model error, so the leg is discarded (NOT bet). Selection now lives entirely in this
+// band — we no longer rank by edge and pick the biggest disagreement first.
+const EDGE_MIN = 0.03;
+const EDGE_MAX = 0.07;
+// MAX_EDGE only shrinks the probability used for EV/Kelly so a wildly over-confident model number
+// can't inflate the math. It no longer drives selection (the band does). Kept below EDGE_MAX so
+// in-band legs near the top of the band still get a conservative prob.
+const MAX_EDGE = 0.05;
+// a Draw is allowed back into the card (even when it isn't the predicted result) only if its raw
+// edge clears this — i.e. a real value draw, not every coin-flip. Must still pass the band above.
 const DRAW_MIN_EDGE = 0.05;
 
 // candidate legs for one event: each { game, market, pick, modelProb, ml, dec, impl, edge }
@@ -70,8 +84,9 @@ async function matchLegs(ev) {
     const dec = amToDec(ml);
     if (dec == null || rawProb == null) return;
     const impl = 1 / dec;
-    const edge = Math.sign(rawProb - impl) * Math.min(Math.abs(rawProb - impl), MAX_EDGE);
-    cands.push({ id: ev.id, game, market, pick, group, modelProb: impl + edge, ml, dec, impl, edge, coherent, fadePublic: fade });
+    const rawEdge = rawProb - impl; // uncapped: this is what selection's band is judged on
+    const edge = Math.sign(rawEdge) * Math.min(Math.abs(rawEdge), MAX_EDGE); // capped, for EV/Kelly only
+    cands.push({ id: ev.id, game, market, pick, group, modelProb: impl + edge, ml, dec, impl, edge, rawEdge, coherent, fadePublic: fade });
   };
 
   pushLeg("Moneyline", h.team.abbreviation, pred.wH, fd.home?.ml, "Moneyline", h.team.abbreviation === mlFav, fadePublic(h.team.abbreviation));
@@ -80,7 +95,7 @@ async function matchLegs(ev) {
   // value-draw exception: a Draw isn't usually the predicted result, but if the model's draw
   // probability clears the price by a real margin, let it back in (underdog TEAM MLs stay out).
   const drawLeg = cands.find((l) => l.group === "Moneyline" && l.pick === "Draw");
-  if (drawLeg && drawLeg.edge >= DRAW_MIN_EDGE) drawLeg.coherent = true;
+  if (drawLeg && drawLeg.rawEdge >= DRAW_MIN_EDGE) drawLeg.coherent = true;
   if (fd.total && fd.total.line != null) {
     const L = fd.total.line, pOver = 1 - poissonCdf(Math.floor(L), lamT);
     pushLeg("Total", `Over ${L}`, pOver, fd.total.over, "Total", totalFav === "Over");
@@ -132,33 +147,22 @@ async function matchLegs(ev) {
   return { id: ev.id, game, date: ev.date, candidates: cands };
 }
 
-// can two legs both be true in one match outcome? The only real clash is BTTS Yes (needs >= 2
-// goals) against a low Under line. Underdog ML + Under, ML + corners, etc. are all satisfiable.
-function legConflict(a, b) {
-  const isBTTSyes = (l) => l.group === "BTTS" && /yes/i.test(l.pick);
-  const underLine = (l) => (l.group === "Total" && /under/i.test(l.pick)) ? parseFloat(l.pick.replace(/[^0-9.]/g, "")) : null;
-  for (const [x, y] of [[a, b], [b, a]]) if (isBTTSyes(x)) { const u = underLine(y); if (u != null && u < 2) return true; }
-  return false;
+// is a leg worth betting at all? It must (a) AGREE with the model's predicted side (coherent),
+// (b) NOT be a side the sharps are fading, and (c) sit inside the believable edge band — big
+// disagreements (>= EDGE_MAX) are discarded as model error rather than bet as value.
+function bettable(l) {
+  return l.coherent && !l.fadePublic && l.rawEdge >= EDGE_MIN && l.rawEdge < EDGE_MAX;
 }
 
-// legs for a same-game parlay: only legs that (a) AGREE with the model's predicted side
-// (coherent — favoured ML / favoured total etc.), (b) carry a positive capped edge, and (c) the
-// sharps aren't fading; ranked by edge, one per group, no impossible combos. Tightened toward
-// favourites: higher hit rate, smaller payouts, no bare draw / underdog longshots.
-function pickMix(cands, n = 3) {
-  const ok = cands.filter((l) => l.coherent && l.edge > 0 && !l.fadePublic).sort((a, b) => b.edge - a.edge);
-  const picks = [], groups = new Set();
-  for (const l of ok) {
-    if (picks.length >= n) break;
-    if (groups.has(l.group) || picks.some((p) => legConflict(p, l))) continue;
-    picks.push(l); groups.add(l.group);
-  }
-  return picks;
+// the single best bettable leg for a game, ranked by hit probability (steadiest bet — this is
+// what we stake as a straight single), or null if the game has no qualifying leg.
+function bestSingle(cands) {
+  return cands.filter(bettable).sort((a, b) => b.modelProb - a.modelProb)[0] || null;
 }
 
-// the best single coherent, positive-edge leg for a game (for the cross-game parlay), or null
-function bestLeg(cands) {
-  return cands.filter((l) => l.coherent && l.edge > 0 && !l.fadePublic).sort((a, b) => b.edge - a.edge)[0] || null;
+// the longest-priced bettable leg for a game (for the for-fun cross-game longshot), or null
+function longLeg(cands) {
+  return cands.filter(bettable).sort((a, b) => b.dec - a.dec)[0] || null;
 }
 
 // plain-English reason a leg was chosen, from its market, pick and (capped) edge vs the price
@@ -202,8 +206,8 @@ const localDay = (d) => {
 };
 const bettingDay = (d) => localDay(new Date(d).getTime() - BETTING_DAY_CUTOFF_HRS * 3600 * 1000);
 
-// the day's parlays: one same-game parlay per upcoming game on today's betting slate + one
-// cross-game parlay. The slate spans this calendar day plus tomorrow's post-midnight kickoffs
+// the day's card: one straight SINGLE per upcoming game (the best in-band leg), plus one for-fun
+// cross-game longshot. The slate spans this calendar day plus tomorrow's post-midnight kickoffs
 // (before the cutoff), so a "technically tomorrow" 12am game is bet today, not on tomorrow's card.
 // `events` overrides the source (used for testing / a specific day's slate) — no day filter then.
 export async function generateDailyParlays(stake = 10, events = null) {
@@ -231,24 +235,16 @@ export async function generateDailyParlays(stake = 10, events = null) {
     const ml = await matchLegs(ev).catch(() => null);
     if (ml && ml.candidates.length) games.push(ml);
   }
-  // up to 3 +edge legs per same-game parlay (underdogs allowed); skip games with no qualifying leg
-  const perGame = games
-    .map((g) => ({ game: g.game, date: g.date, parlay: buildParlay(pickMix(g.candidates, 3), stake) }))
-    .filter((g) => g.parlay);
-  // cross-game "value": the best-edge +edge leg per game (needs >= 2 games to be a parlay)
-  const crossLegs = games.map((g) => bestLeg(g.candidates)).filter(Boolean);
-  const cross = crossLegs.length >= 2 ? buildParlay(crossLegs, stake) : null;
-  // cross-game "longshot": the LONGEST-PRICED +edge leg per game — max payout, lower hit rate.
-  // This is the swing-for-the-fences ticket (still gated on a real, capped edge per leg).
-  const longLegs = games.map((g) => {
-    const pos = g.candidates.filter((l) => l.coherent && l.edge > 0 && !l.fadePublic);
-    return pos.length ? pos.slice().sort((a, b) => b.dec - a.dec)[0] : null;
-  }).filter(Boolean);
-  let longshot = longLegs.length >= 2 ? buildParlay(longLegs, stake) : null;
-  // don't show the longshot if it's the same ticket as the value cross
-  if (longshot && cross && longshot.legs.length === cross.legs.length &&
-      longshot.legs.every((l, i) => l.game === cross.legs[i].game && l.pick === cross.legs[i].pick)) longshot = null;
-  return { date: events ? bettingDay(events?.[0]?.date || Date.now()) : slate, stake, perGame, cross, longshot };
+  // PRIMARY (tracked): one straight single per game — the best in-band leg, staked on its own so
+  // a real edge can play out instead of compounding the book's margin across correlated legs.
+  const singles = games
+    .map((g) => { const l = bestSingle(g.candidates); return l ? { game: g.game, date: g.date, bet: buildParlay([l], stake) } : null; })
+    .filter(Boolean);
+  // FOR FUN (NOT tracked / not logged): one cross-game longshot — the longest-priced in-band leg
+  // per game, across DIFFERENT games so the legs are uncorrelated. Max payout, low hit rate.
+  const longLegs = games.map((g) => longLeg(g.candidates)).filter(Boolean);
+  const longshot = longLegs.length >= 2 ? buildParlay(longLegs, stake) : null;
+  return { date: events ? bettingDay(events?.[0]?.date || Date.now()) : slate, stake, singles, longshot };
 }
 
 // a readable (ASCII-safe) text block for the morning routine / log
@@ -258,18 +254,18 @@ export function formatParlays(out) {
     `    - ${l.game} | ${l.market}: ${l.pick} (${fmtAm(l.ml)}, model ${pct(l.modelProb)}, edge ${l.edge >= 0 ? "+" : ""}${Math.round(l.edge * 100)}%)`,
     `        why: ${l.why}`,
   ].join("\n");
-  const parBlock = (title, p) => {
-    if (!p) return `${title}: (not enough games)`;
+  const betBlock = (title, p) => {
+    if (!p) return `${title}: (no qualifying bet)`;
     const k = p.kelly > 0.002 ? `Kelly ${(p.kelly * 100).toFixed(1)}% of bankroll` : "Kelly: skip (-EV)";
     return [
       `${title}  ${fmtAm(p.americanOdds)}  ($${p.stake} -> $${p.payout.toFixed(2)})`,
       ...p.legs.map(legLine),
-      `    combined model ${pct(p.modelProb)} | model EV ${p.ev >= 0 ? "+" : ""}$${p.ev.toFixed(2)} | ${k}`,
+      `    model ${pct(p.modelProb)} to hit | model EV ${p.ev >= 0 ? "+" : ""}$${p.ev.toFixed(2)} | ${k}`,
     ].join("\n");
   };
-  const lines = [`World Cup parlays | ${out.date} | $${out.stake} each`, ""];
-  for (const g of out.perGame) lines.push(parBlock(`> ${g.game}`, g.parlay), "");
-  lines.push(parBlock("> ALL GAMES (best value, one leg each)", out.cross));
-  if (out.longshot) lines.push("", parBlock("> LONGSHOT (max payout, one leg each)", out.longshot));
+  const lines = [`World Cup singles | ${out.date} | $${out.stake} each`, ""];
+  if (!out.singles.length) lines.push("(no qualifying single-leg bets on this slate)", "");
+  for (const g of out.singles) lines.push(betBlock(`> ${g.game}`, g.bet), "");
+  if (out.longshot) lines.push("--- for fun (not tracked) ---", "", betBlock("> LONGSHOT (one leg per game, max payout)", out.longshot));
   return lines.join("\n");
 }
