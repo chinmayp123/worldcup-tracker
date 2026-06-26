@@ -24,6 +24,13 @@ function statsBlock() {
     lines.push("Calibration (model says X% -> actually hit Y%):");
     for (const b of s.calibration) lines.push(`  ${b.bucket}: predicted ${pct(b.predicted)} vs actual ${pct(b.actual)}  (n=${b.n})`);
   }
+  const f = s.fade;
+  if (f && f.legs) {
+    lines.push("", "=== Shadow fade (betting the opposite of every leg) ===");
+    lines.push(`Fade hit rate: ${pct(f.hitRate)} (${f.legs} legs)${f.hitRate > 0.5 ? "  <- model has negative skill" : ""}`);
+    lines.push(`  by market: ${f.byMarket.map((b) => `${b.market} ${pct(b.hitRate)}`).join(" | ")}`);
+    lines.push(`Est. flat-$10 fade on two-way markets (${f.betLegs} legs): profit $${f.profit.toFixed(2)} | ROI ${pct(f.roi)} (Moneyline = hit-rate only, 3-way)`);
+  }
   return lines.join("\n");
 }
 

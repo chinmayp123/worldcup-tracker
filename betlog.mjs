@@ -5,7 +5,7 @@
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { summary, statMap } from "./lib.mjs";
+import { summary, statMap, ml2prob } from "./lib.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const LOG_DIR = join(HERE, "bets");
@@ -103,6 +103,48 @@ export async function settle() {
   return data;
 }
 
+// "Shadow fade" experiment — what flat-staking the OPPOSITE of every leg would have done.
+// The fade of a leg wins exactly when the model's pick lost, so it's a pure re-grade of data we
+// already have (no extra bets logged, no API calls). Two-way markets (Total/BTTS/Corners) have a
+// clean opposite, so we estimate $ P/L by inverting the logged price across an assumed two-way
+// overround. Moneyline is 3-way — "fade the draw/dog" isn't a single bet — so it counts toward the
+// hit-rate read but NOT the $ estimate. Legs are deduped (a cross leg repeats its same-game leg).
+const FADE_TWO_WAY = new Set(["Total", "BTTS", "Corners"]);
+const FADE_VIG = 1.045;   // assumed two-way overround, for inverting the model-side price
+const FADE_STAKE = 10;    // hypothetical flat stake per faded leg
+function fadeStats(days) {
+  const seen = new Set();
+  const legs = [];
+  for (const d of days) for (const p of d.parlays || []) for (const l of p.legs || []) {
+    if (l.result !== "hit" && l.result !== "miss") continue;
+    const k = `${d.date}|${l.game}|${l.market}|${l.pick}`;
+    if (seen.has(k)) continue;
+    seen.add(k);
+    legs.push(l);
+  }
+  const byMarket = {};
+  let hit = 0, staked = 0, returned = 0, betLegs = 0;
+  for (const l of legs) {
+    const fadeHit = l.result === "miss"; // fading wins iff the model's pick missed
+    if (fadeHit) hit++;
+    const bm = (byMarket[l.market] ??= { n: 0, hit: 0 });
+    bm.n++; if (fadeHit) bm.hit++;
+    if (FADE_TWO_WAY.has(l.market) && l.ml != null) {
+      const fadeImpl = Math.min(0.98, Math.max(0.02, FADE_VIG - ml2prob(l.ml)));
+      staked += FADE_STAKE; betLegs++;
+      if (fadeHit) returned += FADE_STAKE / fadeImpl;
+    }
+  }
+  return {
+    legs: legs.length,
+    hit,
+    hitRate: legs.length ? hit / legs.length : null,
+    byMarket: Object.entries(byMarket).map(([market, b]) => ({ market, n: b.n, hitRate: b.hit / b.n })),
+    betLegs, staked, returned, profit: returned - staked,
+    roi: staked ? (returned - staked) / staked : null,
+  };
+}
+
 // calibration + performance over a given list of logged days
 function computeStats(days) {
   const legs = days.flatMap((d) => d.parlays).flatMap((p) => p.legs).filter((l) => l.result === "hit" || l.result === "miss");
@@ -125,6 +167,7 @@ function computeStats(days) {
     calibration: buckets.map((b, i) => ({ bucket: `${i * 10}-${i * 10 + 10}%`, n: b.n, predicted: b.n ? b.psum / b.n : null, actual: b.n ? b.hit / b.n : null })).filter((b) => b.n > 0),
     parlays: settled.length, parlayWins: wins, staked, returned, profit: returned - staked,
     roi: staked ? (returned - staked) / staked : null,
+    fade: fadeStats(days),
   };
 }
 

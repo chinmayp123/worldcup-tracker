@@ -857,6 +857,23 @@ function renderRecord(data) {
     ]));
   }
 
+  // shadow fade — what flat-staking the OPPOSITE of every leg would have done. Honest gut-check
+  // on whether the model has negative skill (fade > 50%) or is just noisy.
+  const f = s.fade;
+  if (f && f.legs) {
+    wrap.appendChild(h("div", { class: "label", text: "🔄 Shadow fade · betting the opposite" }));
+    wrap.appendChild(h("div", { class: "rec-grid" }, [
+      stat("Fade hit rate", `${pct(f.hitRate)} (${f.legs})`, f.hitRate > 0.5 ? "up" : ""),
+      stat("Est. profit", money(f.profit), (f.profit ?? 0) >= 0 ? "up" : "neg"),
+      stat("Est. ROI", pct(f.roi), (f.roi ?? 0) >= 0 ? "up" : "neg"),
+    ]));
+    for (const b of f.byMarket || []) wrap.appendChild(h("div", { class: "gk" }, [
+      h("span", { text: b.market }),
+      h("span", { class: "est", text: `fade hits ${pct(b.hitRate)} (n=${b.n})` }),
+    ]));
+    wrap.appendChild(h("div", { class: "hint", text: "Fade wins when the model's pick loses. $ est. = flat $10 on two-way markets (Totals/BTTS/Corners), price inverted across the vig; Moneyline is 3-way so it counts toward hit rate only." }));
+  }
+
   // calibration
   if (s.calibration && s.calibration.length) {
     wrap.appendChild(h("div", { class: "label", text: "Calibration · model % vs actual" }));
